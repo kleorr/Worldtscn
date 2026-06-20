@@ -1,0 +1,49 @@
+[gd_scene format=3 uid="uid://c8j5c4rpunfs7"]
+
+[ext_resource type="PackedScene" uid="uid://b0n6x5s2bwbk" path="res://player.tscn" id="1_f3sb7"]
+[ext_resource type="Script" uid="uid://c6oo4nramqcwx" path="res://WorldGenerator.cs" id="1_fj7yv"]
+
+[sub_resource type="PhysicalSkyMaterial" id="PhysicalSkyMaterial_50wdj"]
+
+[sub_resource type="Sky" id="Sky_hynfd"]
+sky_material = SubResource("PhysicalSkyMaterial_50wdj")
+
+[sub_resource type="Environment" id="Environment_nxn2a"]
+background_mode = 2
+background_color = Color(0.80784315, 0, 0.5058824, 0.34901962)
+sky = SubResource("Sky_hynfd")
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hynfd"]
+transparency = 1
+shading_mode = 0
+albedo_color = Color(0.03529412, 0.03529412, 0.03529412, 0.23529412)
+
+[sub_resource type="BoxMesh" id="BoxMesh_nxn2a"]
+material = SubResource("StandardMaterial3D_hynfd")
+size = Vector3(1.01, 1.01, 1.01)
+
+[node name="Node3D" type="Node3D" unique_id=109967267]
+script = ExtResource("1_fj7yv")
+
+[node name="Player" parent="." unique_id=284627862 instance=ExtResource("1_f3sb7")]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 20, 8)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=787980401]
+transform = Transform3D(-0.06026099, 0.99810725, -0.012268662, 0.0037916475, 0.012519807, 0.9999144, 0.9981755, 0.060209308, -0.004538928, 8.988202, 37.476883, -3.7675905)
+light_energy = 16.0
+light_bake_mode = 1
+shadow_enabled = true
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="." unique_id=1148458934]
+environment = SubResource("Environment_nxn2a")
+
+[node name="CenterContainer" type="CenterContainer" parent="." unique_id=1854841370]
+offset_right = 1152.0
+offset_bottom = 648.0
+
+[node name="ColorRect" type="ColorRect" parent="CenterContainer" unique_id=484697181]
+custom_minimum_size = Vector2(4, 4)
+layout_mode = 2
+
+[node name="BlockHighlight" type="MeshInstance3D" parent="." unique_id=130155628]
+mesh = SubResource("BoxMesh_nxn2a")
