@@ -1,0 +1,39 @@
+[gd_scene format=3 uid="uid://7u2n4evcmypg"]
+
+[ext_resource type="Script" uid="uid://dv5gmd0xax30" path="res://MainMenu.cs" id="1_i26rj"]
+
+[node name="MainMenu" type="Control" unique_id=98756483]
+layout_mode = 3
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+script = ExtResource("1_i26rj")
+
+[node name="VBoxContainer" type="VBoxContainer" parent="." unique_id=635954389]
+layout_mode = 0
+offset_top = 164.0
+offset_right = 1152.0
+offset_bottom = 198.0
+
+[node name="NormalWorldButton" type="Button" parent="VBoxContainer" unique_id=1841664713]
+layout_mode = 2
+text = "Create Normal World"
+
+[node name="SeedInput" type="LineEdit" parent="VBoxContainer" unique_id=58434456]
+layout_mode = 2
+placeholder_text = "                                                                          Seed                                                                                                       (Leave empty for random)"
+
+[node name="VBoxContainer2" type="VBoxContainer" parent="." unique_id=1300395052]
+layout_mode = 0
+offset_top = 291.0
+offset_right = 1152.0
+offset_bottom = 331.0
+
+[node name="FlatWorldButton" type="Button" parent="VBoxContainer2" unique_id=224043344]
+layout_mode = 2
+text = "Create Flat World"
+
+[connection signal="pressed" from="VBoxContainer/NormalWorldButton" to="." method="_on_normal_world_button_pressed"]
+[connection signal="pressed" from="VBoxContainer2/FlatWorldButton" to="." method="_on_flat_world_button_pressed"]

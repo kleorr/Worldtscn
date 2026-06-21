@@ -19,7 +19,7 @@ public partial class Player : CharacterBody3D
 	private TextureRect[] _slots = new TextureRect[6];
 	private Label _blockNameLabel;
 
-	private string[] _blockFullNames = { "Камень", "Трава", "Бревно дуба", "Листва", "Доски", "Обсидиан" };
+	private string[] _blockFullNames = { "Stone", "Grass", "Oak Log", "Leaves", "Oak Planks", "Obsidian" };
 	private string[] _texturePaths = {
 		"res://textures/stone.png",
 		"res://textures/grassblock_top.png",

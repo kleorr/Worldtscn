@@ -5,7 +5,7 @@ using System.Collections.Generic;
 public partial class Chunk : StaticBody3D
 {
 	public const int Width = 16;
-	public const int Height = 16;
+	public const int Height = 64;
 	
 	public byte[,,] Blocks = new byte[Width, Height, Width];
 	
