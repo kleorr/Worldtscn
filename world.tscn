@@ -1,7 +1,8 @@
 [gd_scene format=3 uid="uid://c8j5c4rpunfs7"]
 
-[ext_resource type="PackedScene" uid="uid://b0n6x5s2bwbk" path="res://player.tscn" id="1_f3sb7"]
 [ext_resource type="Script" uid="uid://c6oo4nramqcwx" path="res://WorldGenerator.cs" id="1_fj7yv"]
+[ext_resource type="Script" uid="uid://hfu4unelxvcd" path="res://NetworkManager.cs" id="3_aqk2v"]
+[ext_resource type="Script" uid="uid://ddm4ry8n4mhkd" path="res://PauseMenu.cs" id="3_tlwt5"]
 
 [sub_resource type="PhysicalSkyMaterial" id="PhysicalSkyMaterial_50wdj"]
 
@@ -25,9 +26,6 @@ size = Vector3(1.01, 1.01, 1.01)
 [node name="Node3D" type="Node3D" unique_id=109967267]
 script = ExtResource("1_fj7yv")
 
-[node name="Player" parent="." unique_id=284627862 instance=ExtResource("1_f3sb7")]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 8, 20, 8)
-
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="." unique_id=787980401]
 transform = Transform3D(-0.06026099, 0.99810725, -0.012268662, 0.0037916475, 0.012519807, 0.9999144, 0.9981755, 0.060209308, -0.004538928, 8.988202, 37.476883, -3.7675905)
 light_energy = 16.0
@@ -47,3 +45,59 @@ layout_mode = 2
 
 [node name="BlockHighlight" type="MeshInstance3D" parent="." unique_id=130155628]
 mesh = SubResource("BoxMesh_nxn2a")
+
+[node name="PauseMenu" type="CanvasLayer" parent="." unique_id=1843292288]
+process_mode = 3
+visible = false
+script = ExtResource("3_tlwt5")
+
+[node name="ColorRect" type="ColorRect" parent="PauseMenu" unique_id=2015783504]
+anchors_preset = 15
+anchor_right = 1.0
+anchor_bottom = 1.0
+grow_horizontal = 2
+grow_vertical = 2
+scale = Vector2(1, 1.16)
+mouse_filter = 2
+color = Color(1, 1, 1, 0.20392157)
+
+[node name="VBoxContainer" type="VBoxContainer" parent="PauseMenu" unique_id=2139145401]
+anchors_preset = 8
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -74.5
+offset_top = -68.0
+offset_right = 74.5
+offset_bottom = 68.0
+grow_horizontal = 2
+grow_vertical = 2
+
+[node name="ResumeButton" type="Button" parent="PauseMenu/VBoxContainer" unique_id=252184944]
+layout_mode = 2
+text = "Resume"
+
+[node name="HostButton" type="Button" parent="PauseMenu/VBoxContainer" unique_id=380588677]
+layout_mode = 2
+text = "Open to LAN"
+
+[node name="SaveButton" type="Button" parent="PauseMenu/VBoxContainer" unique_id=1927914792]
+layout_mode = 2
+text = "Save World"
+
+[node name="ExitButton" type="Button" parent="PauseMenu/VBoxContainer" unique_id=92735314]
+layout_mode = 2
+text = "Exit to Main Menu"
+
+[node name="NetworkManager" type="Node" parent="." unique_id=566689246]
+script = ExtResource("3_aqk2v")
+
+[node name="MultiplayerSpawner" type="MultiplayerSpawner" parent="NetworkManager" unique_id=1248929784]
+_spawnable_scenes = PackedStringArray("uid://b0n6x5s2bwbk")
+spawn_path = NodePath("../..")
+
+[connection signal="pressed" from="PauseMenu/VBoxContainer/ResumeButton" to="PauseMenu" method="_on_button_pressed"]
+[connection signal="pressed" from="PauseMenu/VBoxContainer/HostButton" to="PauseMenu" method="_on_button_3_pressed"]
+[connection signal="pressed" from="PauseMenu/VBoxContainer/SaveButton" to="PauseMenu" method="_on_button_2_pressed"]
+[connection signal="pressed" from="PauseMenu/VBoxContainer/ExitButton" to="PauseMenu" method="_on_button_4_pressed"]

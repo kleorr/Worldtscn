@@ -10,6 +10,16 @@ height = 1.8
 radius = 0.3
 height = 1.8
 
+[sub_resource type="CapsuleMesh" id="CapsuleMesh_nxn2a"]
+
+[sub_resource type="SceneReplicationConfig" id="SceneReplicationConfig_4flbx"]
+properties/0/path = NodePath(".:position")
+properties/0/spawn = true
+properties/0/replication_mode = 1
+properties/1/path = NodePath(".:rotation")
+properties/1/spawn = true
+properties/1/replication_mode = 1
+
 [node name="CharacterBody3D" type="CharacterBody3D" unique_id=284627862]
 script = ExtResource("1_4flbx")
 
@@ -26,3 +36,9 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
 
 [node name="BlockRayCast" type="RayCast3D" parent="Head/Camera3D" unique_id=897076386]
 target_position = Vector3(0, 0, -5)
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="." unique_id=174542471]
+mesh = SubResource("CapsuleMesh_nxn2a")
+
+[node name="MultiplayerSynchronizer" type="MultiplayerSynchronizer" parent="." unique_id=949452471]
+replication_config = SubResource("SceneReplicationConfig_4flbx")

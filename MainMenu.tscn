@@ -25,15 +25,52 @@ text = "Create Normal World"
 layout_mode = 2
 placeholder_text = "                                                                          Seed                                                                                                       (Leave empty for random)"
 
-[node name="VBoxContainer2" type="VBoxContainer" parent="." unique_id=1300395052]
+[node name="VBoxContainer3" type="VBoxContainer" parent="." unique_id=255542006]
 layout_mode = 0
-offset_top = 291.0
+offset_top = 273.0
 offset_right = 1152.0
-offset_bottom = 331.0
+offset_bottom = 339.0
 
-[node name="FlatWorldButton" type="Button" parent="VBoxContainer2" unique_id=224043344]
+[node name="FlatWorldButton" type="Button" parent="VBoxContainer3" unique_id=224043344]
 layout_mode = 2
 text = "Create Flat World"
 
+[node name="VBoxContainer4" type="VBoxContainer" parent="." unique_id=1106949538]
+layout_mode = 0
+offset_top = 341.0
+offset_right = 1152.0
+offset_bottom = 407.0
+
+[node name="SavesButton" type="Button" parent="VBoxContainer4" unique_id=41604737]
+layout_mode = 2
+text = "Load World"
+
+[node name="VBoxContainer5" type="VBoxContainer" parent="." unique_id=663424054]
+layout_mode = 0
+offset_top = 410.0
+offset_right = 1152.0
+offset_bottom = 476.0
+
+[node name="JoinButton" type="Button" parent="VBoxContainer5" unique_id=1719881720]
+layout_mode = 2
+text = "Join to LAN"
+
+[node name="IpInput" type="LineEdit" parent="VBoxContainer5" unique_id=1729382683]
+layout_mode = 2
+placeholder_text = "                                                                                                                                IP Address"
+
+[node name="Label" type="Label" parent="." unique_id=1818187308]
+layout_mode = 0
+offset_left = 353.0
+offset_top = 42.0
+offset_right = 629.6666
+offset_bottom = 125.0
+scale = Vector2(1.6158538, 1.4342923)
+text = "Worldtscn"
+horizontal_alignment = 1
+vertical_alignment = 1
+
 [connection signal="pressed" from="VBoxContainer/NormalWorldButton" to="." method="_on_normal_world_button_pressed"]
-[connection signal="pressed" from="VBoxContainer2/FlatWorldButton" to="." method="_on_flat_world_button_pressed"]
+[connection signal="pressed" from="VBoxContainer3/FlatWorldButton" to="." method="_on_flat_world_button_pressed"]
+[connection signal="pressed" from="VBoxContainer4/SavesButton" to="." method="_on_saves_button_pressed"]
+[connection signal="pressed" from="VBoxContainer5/JoinButton" to="." method="_on_join_button_pressed"]
