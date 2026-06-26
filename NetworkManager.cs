@@ -3,38 +3,40 @@ using System;
 
 public partial class NetworkManager : Node
 {
-	[Export] public PackedScene PlayerScene;
+	// Статическая ссылка, чтобы легко вызывать сетевые методы из других скриптов
+	public static NetworkManager Instance { get; private set; }
+
+	[Export] public PackedScene PlayerScene; 
 	private const int DefaultPort = 25565;
 	
 	private CanvasLayer _loadingScreen;
 
 	public override void _Ready()
 	{
-		// Подключаем базовые сигналы
+		Instance = this; // Инициализируем синглтон
+
 		Multiplayer.PeerConnected += OnPeerConnected;
 		Multiplayer.PeerDisconnected += OnPeerDisconnected;
 		
-		// Сигналы для контроля подключения на стороне клиента
+		// Сигналы для контроля подключения клиента
 		Multiplayer.ConnectedToServer += OnConnectedToServer;
 		Multiplayer.ConnectionFailed += OnConnectionFailed;
 		Multiplayer.ServerDisconnected += OnServerDisconnected;
 
 		if (WorldSettings.IsMultiplayerClient)
 		{
-			// Клиент: показываем загрузку и подключаемся
 			ShowLoadingScreen("Connecting to server...");
 			JoinGame(WorldSettings.ServerIp);
 		}
 		else
 		{
-			// Хост / Синглплеер: генерируем мир локально
 			StartLocalWorld();
 		}
 	}
 
 	private async void StartLocalWorld()
 	{
-		ShowLoadingScreen("Generating singleplayer world...");
+		ShowLoadingScreen("Generating world. Please wait...");
 		
 		var worldGenerator = GetTree().CurrentScene as WorldGenerator;
 		if (worldGenerator != null)
@@ -49,7 +51,7 @@ public partial class NetworkManager : Node
 
 	public void HostGame()
 	{
-		// ИСПРАВЛЕНО: Проверяем только если это РЕАЛЬНЫЙ сетевой пир ENet, игнорируя дефолтный офлайн-пир
+		// Проверяем, запущен ли уже реальный ENet сервер, игнорируя встроенный офлайн-пир Godot
 		if (Multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer && enetPeer.GetConnectionStatus() != MultiplayerPeer.ConnectionStatus.Disconnected)
 		{
 			GD.Print("[СЕТЬ] Сервер уже работает.");
@@ -66,7 +68,7 @@ public partial class NetworkManager : Node
 		}
 
 		Multiplayer.MultiplayerPeer = peer;
-		GD.Print($"[СЕТЬ] Мир успешно открыт для LAN на порту {DefaultPort}!");
+		GD.Print($"[СЕТЬ] Сервер запущен на порту {DefaultPort}");
 	}
 
 	private void JoinGame(string ipAddress)
@@ -76,32 +78,32 @@ public partial class NetworkManager : Node
 		
 		if (error != Error.Ok)
 		{
-			GD.PrintErr($"[СЕТЬ] Ошибка инициализации клиента: {error}");
+			GD.PrintErr($"[СЕТЬ] Ошибка подключения к серверу: {error}");
 			HideLoadingScreen();
 			return;
 		}
 
 		Multiplayer.MultiplayerPeer = peer;
-		GD.Print($"[СЕТЬ] Попытка подключения к хосту {ipAddress}...");
+		GD.Print($"[СЕТЬ] Подключение к хосту {ipAddress}...");
 	}
 
 	// === СИГНАЛЫ КЛИЕНТА ===
 
 	private void OnConnectedToServer()
 	{
-		GD.Print("[СЕТЬ] Успешно подключились к серверу! Ожидаем данные мира...");
+		GD.Print("[СЕТЬ] Успешно подключились! Ожидаем данные мира...");
 		ShowLoadingScreen("Syncing world data...");
 	}
 
 	private void OnConnectionFailed()
 	{
-		GD.PrintErr("[СЕТЬ] Не удалось подключиться к серверу.");
-		ShowLoadingScreen("Error: Server unreachable!");
+		GD.PrintErr("[СЕТЬ] Не удалось подключиться.");
+		ShowLoadingScreen("Error: Server unavailable!");
 	}
 
 	private void OnServerDisconnected()
 	{
-		GD.Print("[СЕТЬ] Соединение с сервером разорвано.");
+		GD.Print("[СЕТЬ] Соединение потеряно.");
 		ShowLoadingScreen("Connection lost...");
 	}
 
@@ -111,15 +113,15 @@ public partial class NetworkManager : Node
 	{
 		if (Multiplayer.IsServer())
 		{
-			GD.Print($"[СЕТЬ] Игрок {id} вошел в LAN. Отправляем ему настройки мира...");
+			GD.Print($"[СЕТЬ] Игрок {id} подключился. Отправляем ему настройки мира...");
 			RpcId(id, nameof(SyncWorldFromServer), WorldSettings.CurrentSeed, (int)WorldSettings.CurrentMode);
 		}
 	}
 
-	[Rpc(MultiplayerApi.RpcMode.Authority)]
+	[Rpc(MultiplayerApi.RpcMode.Authority, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
 	private async void SyncWorldFromServer(int serverSeed, int serverMode)
 	{
-		GD.Print($"[СЕТЬ] Получены данные сервера. Сид: {serverSeed}. Строим карту...");
+		GD.Print($"[СЕТЬ] Получены данные сервера. Синхронизируем сид: {serverSeed}");
 		ShowLoadingScreen("Generating world chunks...");
 		
 		WorldSettings.CurrentSeed = serverSeed;
@@ -130,16 +132,20 @@ public partial class NetworkManager : Node
 		{
 			await worldGenerator.GenerateWorld();
 		}
+		else
+		{
+			GD.PrintErr("[ОШИБКА] Не найден скрипт WorldGenerator на главной сцене клиента!");
+		}
 
-		GD.Print("[СЕТЬ] Карта построена. Запрашиваем у сервера спавн персонажа...");
+		GD.Print("[СЕТЬ] Карта построена. Запрашиваем спавн у сервера...");
 		RpcId(1, nameof(ClientIsReadyToSpawn));
 	}
 
-	[Rpc(MultiplayerApi.RpcMode.AnyPeer)]
+	[Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
 	private void ClientIsReadyToSpawn()
 	{
 		long clientId = Multiplayer.GetRemoteSenderId();
-		GD.Print($"[СЕТЬ] Клиент {clientId} готов к спавну.");
+		GD.Print($"[СЕТЬ] Клиент {clientId} полностью готов. Спавним его персонажа.");
 		
 		SpawnPlayer(clientId);
 
@@ -157,25 +163,31 @@ public partial class NetworkManager : Node
 
 	private void DeferredSetPosition(Vector3 position)
 	{
-		string myIdStr = Multiplayer.GetUniqueId().ToString();
-		var myPlayer = GetTree().CurrentScene.GetNodeOrNull<Node3D>(myIdStr);
-		
-		if (myPlayer != null)
+		foreach (Node player in GetTree().GetNodesInGroup("Players"))
 		{
-			myPlayer.GlobalPosition = position;
-			GD.Print($"[СЕТЬ] Персонаж на месте. Игра начинается!");
+			if (player is Node3D player3D && player3D.GetMultiplayerAuthority() == Multiplayer.GetUniqueId())
+			{
+				player3D.GlobalPosition = position;
+				GD.Print("[СЕТЬ] Персонаж установлен на точку спавна. Игра началась!");
+				break;
+			}
 		}
-		// Карта готова, игрок на месте — убираем надпись "Wait"
 		HideLoadingScreen();
 	}
 
 	private void OnPeerDisconnected(long id)
 	{
-		var playerNode = GetTree().CurrentScene.GetNodeOrNull(id.ToString());
-		if (playerNode != null)
+		GD.Print($"[СЕТЬ] Игрок {id} отключился. Удаляем его модельку...");
+		
+		// ИСПРАВЛЕНО: Ищем игрока по его реальному Сетевому ID в группе, а не по имени ноды
+		foreach (Node player in GetTree().GetNodesInGroup("Players"))
 		{
-			playerNode.QueueFree();
-			GD.Print($"[СЕТЬ] Игрок {id} вышел, его узел удален.");
+			if (player is Node3D player3D && player3D.GetMultiplayerAuthority() == id)
+			{
+				player3D.QueueFree();
+				GD.Print($"[УСПЕХ] Моделька игрока {id} успешно удалена из мира.");
+				break;
+			}
 		}
 	}
 
@@ -183,14 +195,19 @@ public partial class NetworkManager : Node
 	{
 		if (PlayerScene == null)
 		{
-			PlayerScene = ResourceLoader.Exists("res://player.tscn") 
-				? GD.Load<PackedScene>("res://player.tscn") 
-				: GD.Load<PackedScene>("res://Player.tscn");
+			if (ResourceLoader.Exists("res://player.tscn"))
+			{
+				PlayerScene = GD.Load<PackedScene>("res://player.tscn");
+			}
+			else
+			{
+				PlayerScene = GD.Load<PackedScene>("res://Player.tscn");
+			}
 		}
 
 		if (PlayerScene == null)
 		{
-			GD.PrintErr("[ОШИБКА] Файл сцены игрока не найден!");
+			GD.PrintErr("[ОШИБКА] Файл player.tscn не найден в проекте!");
 			return;
 		}
 
@@ -200,14 +217,70 @@ public partial class NetworkManager : Node
 		player.Name = id.ToString();
 		player.SetMultiplayerAuthority((int)id);
 		
+		// ИСПРАВЛЕНО: Добавляем игрока в специальную группу для точного отслеживания сети
+		player.AddToGroup("Players");
+		
 		float centerCoordinate = (32 * Chunk.Width) / 2f;
-		player.Position = new Vector3(centerCoordinate, Chunk.Height + 5f, centerCoordinate);
+		player.Position = new Vector3(centerCoordinate, Chunk.Height + 5f, centerCoordinate); 
 		
 		GetTree().CurrentScene.CallDeferred(Node.MethodName.AddChild, player);
-		GD.Print($"[СЕТЬ] Игрок {id} заспавнен в {player.Position}");
+		GD.Print($"[СЕТЬ] Игрок {id} успешно заспавнен в координатах {player.Position}");
 	}
 
-	// === ВСПОМОГАТЕЛЬНЫЙ ИНТЕРФЕЙС ЗАГРУЗКИ ===
+	// ========================================================
+	// СИНХРОНИЗАЦИЯ БЛОКОВ (НОВЫЙ ФУНКЦИОНАЛ ДЛЯ ВЕРСИИ 1.4.1)
+	// ========================================================
+
+	// Вызывай этот метод из скрипта ломания/копания блоков игрока вместо прямого обращения к генератору!
+	public void ChallengeBlockChange(Vector3I blockCoords, int blockType)
+	{
+		// Если мы подключены к сети — шлем RPC запрос
+		if (Multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer && enetPeer.GetConnectionStatus() == MultiplayerPeer.ConnectionStatus.Connected)
+		{
+			Rpc(nameof(ServerChangeBlockRpc), blockCoords, blockType);
+		}
+		else
+		{
+			// Если играем в одиночку — просто меняем блок на месте
+			ApplyBlockChangeLocally(blockCoords, blockType);
+		}
+	}
+
+	[Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
+	private void ServerChangeBlockRpc(Vector3I blockCoords, int blockType)
+	{
+		if (!Multiplayer.IsServer()) return;
+
+		// Сервер меняет у себя
+		ApplyBlockChangeLocally(blockCoords, blockType);
+		// И принудительно рассылает всем клиентам
+		Rpc(nameof(ClientChangeBlockRpc), blockCoords, blockType);
+	}
+
+	[Rpc(MultiplayerApi.RpcMode.Authority, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
+	private void ClientChangeBlockRpc(Vector3I blockCoords, int blockType)
+	{
+		if (Multiplayer.IsServer()) return; // Сервер уже применил это у себя ранее
+		
+		// Клиенты меняют у себя
+		ApplyBlockChangeLocally(blockCoords, blockType);
+	}
+
+	private void ApplyBlockChangeLocally(Vector3I blockCoords, int blockType)
+	{
+		var worldGenerator = GetTree().CurrentScene as WorldGenerator;
+		if (worldGenerator != null)
+		{
+			// !!! ВНИМАНИЕ: Замени метод ниже на РЕАЛЬНОЕ название метода установки блоков в твоем скрипте WorldGenerator !!!
+			// Например, если у тебя метод принимает три инта: worldGenerator.SetBlock(blockCoords.X, blockCoords.Y, blockCoords.Z, blockType);
+			// Или если принимает Vector3I: worldGenerator.SetBlock(blockCoords, blockType);
+			
+			// worldGenerator.SetBlock(blockCoords, blockType); 
+			GD.Print($"[БЛОКИ] Изменен блок в точке {blockCoords} на тип {blockType}");
+		}
+	}
+
+	// === ИНТЕРФЕЙС ЗАГРУЗКИ (ENGLISH) ===
 
 	private void ShowLoadingScreen(string message)
 	{
@@ -219,10 +292,10 @@ public partial class NetworkManager : Node
 		}
 
 		_loadingScreen = new CanvasLayer();
-		_loadingScreen.Layer = 100; // Поверх основного интерфейса и меню
+		_loadingScreen.Layer = 100;
 
 		var background = new ColorRect();
-		background.Color = new Color(0.1f, 0.1f, 0.12f, 1.0f); // Приятный темно-угольный цвет
+		background.Color = new Color(0.1f, 0.1f, 0.12f, 1.0f);
 		background.SetAnchorsPreset(Control.LayoutPreset.FullRect);
 		
 		var label = new Label();
@@ -230,7 +303,7 @@ public partial class NetworkManager : Node
 		label.HorizontalAlignment = HorizontalAlignment.Center;
 		label.VerticalAlignment = VerticalAlignment.Center;
 		label.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-		label.AddThemeFontSizeOverride("font_size", 26); // Делаем текст крупным и читаемым
+		label.AddThemeFontSizeOverride("font_size", 26);
 
 		background.AddChild(label);
 		_loadingScreen.AddChild(background);

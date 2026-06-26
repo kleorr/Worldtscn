@@ -21,7 +21,7 @@ public partial class Player : CharacterBody3D
 
 	// Переменные для красивого затухания текста (Майнкрафт-эффект)
 	private float _labelFadeTimer = 0f;
-	private const float LabelDisplayTime = 1.0f; 
+	private const float LabelDisplayTime = 1.0f;
 	private const float LabelFadeTime = 0.5f;    
 
 	private string[] _blockFullNames = { "Stone", "Grass", "Oak Log", "Leaves", "Oak Planks", "Obsidian" };
@@ -34,7 +34,8 @@ public partial class Player : CharacterBody3D
 		"res://textures/obsidian.png"
 	};
 
-	// Точный фикс сетевой ошибки движка. Выставляем ID в момент входа в дерево,
+	// Точный фикс сетевой ошибки движка.
+	// Выставляем ID в момент входа в дерево,
 	// чтобы MultiplayerSynchronizer на клиенте сразу знал своего владельца.
 	public override void _EnterTree()
 	{
@@ -52,6 +53,10 @@ public partial class Player : CharacterBody3D
 
 	public override void _Ready()
 	{
+		// ФИКС ОСТАЮЩИХСЯ МОДЕЛЕК: Каждый персонаж в мире сам слушает сеть. 
+		// Если его владелец отключился — персонаж сам удаляет себя из дерева сцены.
+		Multiplayer.PeerDisconnected += OnPeerDisconnected;
+
 		if (GlobalPosition == Vector3.Zero)
 		{
 			GlobalPosition = new Vector3(256f, 69f, 256f);
@@ -73,6 +78,25 @@ public partial class Player : CharacterBody3D
 		else
 		{
 			if (_camera != null) _camera.Current = false;
+		}
+	}
+
+	public override void _ExitTree()
+	{
+		// Чистим за собой сигнал при уничтожении ноды, чтобы не было утечек памяти
+		if (Multiplayer != null)
+		{
+			Multiplayer.PeerDisconnected -= OnPeerDisconnected;
+		}
+	}
+
+	private void OnPeerDisconnected(long id)
+	{
+		// Если сетевой ID отключившегося игрока совпадает с владельцем этой модельки — удаляем её
+		if (GetMultiplayerAuthority() == id)
+		{
+			GD.Print($"[СЕТЬ] Игрок {id} вышел из игры. Удаляем его персонажа.");
+			QueueFree();
 		}
 	}
 
@@ -140,7 +164,7 @@ public partial class Player : CharacterBody3D
 		{
 			_blockNameLabel.Text = _blockFullNames[_currentSlot];
 			_blockNameLabel.Modulate = new Color(1, 1, 1, 1); 
-			_labelFadeTimer = LabelDisplayTime + LabelFadeTime; 
+			_labelFadeTimer = LabelDisplayTime + LabelFadeTime;
 		}
 	}
 
@@ -167,7 +191,6 @@ public partial class Player : CharacterBody3D
 
 			_rotationX -= mouseMotion.Relative.Y * MouseSensitivity;
 			_rotationX = Mathf.Clamp(_rotationX, Mathf.DegToRad(-89f), Mathf.DegToRad(89f));
-			
 			if (_camera != null)
 			{
 				Vector3 camRot = _camera.Rotation;
@@ -314,11 +337,61 @@ public partial class Player : CharacterBody3D
 		}
 	}
 
+	// === СЕТЕВАЯ СИНХРОНИЗАЦИЯ СТРОИТЕЛЬСТВА БЛОКОВ ===
 	private void CallUpdateBlockInWorld(int x, int y, int z, byte type)
 	{
-		// Ищем метод SetBlockAt СТРОГО на корневом узле текущей запущенной сцены (Node3D)
-		var world = GetTree().CurrentScene;
+		// Проверяем, запущена ли сетевая игра (активен ли ENetPeer)
+		if (Multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer && enetPeer.GetConnectionStatus() == MultiplayerPeer.ConnectionStatus.Connected)
+		{
+			if (Multiplayer.IsServer())
+			{
+				// Если блок ставит Хост/Сервер:
+				// 1. Сразу меняем его в своём локальном мире
+				LocalUpdateBlock(x, y, z, type);
+				// 2. Рассылаем RPC всем подключённым клиентам
+				Rpc(nameof(ClientUpdateBlockRpc), x, y, z, type);
+			}
+			else
+			{
+				// Если блок ставит Клиент:
+				// 1. Меняем локально у себя (для мгновенного отклика без задержек сети)
+				LocalUpdateBlock(x, y, z, type);
+				// 2. Отправляем RPC-запрос на Сервер
+				Rpc(nameof(ServerUpdateBlockRpc), x, y, z, type);
+			}
+		}
+		else
+		{
+			// Одиночная игра — просто меняем блок на месте
+			LocalUpdateBlock(x, y, z, type);
+		}
+	}
 
+	// Этот RPC-метод выполнится на СЕРВЕРЕ, когда клиент пришлет пакет изменения блока
+	[Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
+	private void ServerUpdateBlockRpc(int x, int y, int z, byte type)
+	{
+		if (!Multiplayer.IsServer()) return;
+
+		// Сервер меняет блок в своей копии карты
+		LocalUpdateBlock(x, y, z, type);
+		// И заставляет всех остальных клиентов тоже обновить этот блок у себя
+		Rpc(nameof(ClientUpdateBlockRpc), x, y, z, type);
+	}
+
+	// Этот RPC-метод выполнится на КЛИЕНТАХ, обновляя блоки в их мирах
+	[Rpc(MultiplayerApi.RpcMode.Authority, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
+	private void ClientUpdateBlockRpc(int x, int y, int z, byte type)
+	{
+		if (Multiplayer.IsServer()) return; // Сервер уже применил изменения ранее
+
+		LocalUpdateBlock(x, y, z, type);
+	}
+
+	// Оригинальный локальный метод вызова генератора мира
+	private void LocalUpdateBlock(int x, int y, int z, byte type)
+	{
+		var world = GetTree().CurrentScene;
 		if (world != null && world.HasMethod("SetBlockAt"))
 		{
 			world.Call("SetBlockAt", x, y, z, type);
