@@ -3,7 +3,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
-using System.Threading.Tasks; // Добавлено для работы с Task
+using System.Threading.Tasks;
 
 public partial class WorldGenerator : Node3D
 {
@@ -20,12 +20,37 @@ public partial class WorldGenerator : Node3D
 		public string WorldName { get; set; }
 		public int Seed { get; set; }
 		public int Mode { get; set; }
+		public float PlayerX { get; set; }
+		public float PlayerY { get; set; }
+		public float PlayerZ { get; set; }
 		public List<BlockSaveData> ModifiedBlocks { get; set; }
 	}
 
+	// Структура для обсчёта физики растекания воды
+	public struct WaterTick
+	{
+		public Vector3I Position;
+		public int SpreadLeft; // Сколько блоков вбок вода ещё может пройти (макс. 4)
+	}
+
 	private Dictionary<Vector3I, byte> _modifiedBlocksDict = new Dictionary<Vector3I, byte>();
+	private Dictionary<Vector2I, Dictionary<Vector3I, byte>> _modifiedBlocksByChunk = new Dictionary<Vector2I, Dictionary<Vector3I, byte>>();
+	
 	private Dictionary<Vector2I, Chunk> _chunks = new Dictionary<Vector2I, Chunk>();
 	private FastNoiseLite _noise;
+	private FastNoiseLite _riverNoise; 
+
+	private float _processTimer = 0f;
+	private const float ChunkUpdateInterval = 0.4f;
+	private bool _isUpdatingChunks = false;
+	private HashSet<Vector2I> _chunksToKeep = new HashSet<Vector2I>();
+	
+	private const int SeaLevel = 14; 
+
+	// Физика воды
+	private Queue<WaterTick> _waterQueue = new Queue<WaterTick>();
+	private float _waterPhysicsTimer = 0f;
+	private const float WaterTickRate = 0.25f; // Задержка обновления воды (0.25с — строго как 5 тиков в Майнкрафте!)
 
 	public override void _Ready()
 	{
@@ -35,55 +60,140 @@ public partial class WorldGenerator : Node3D
 		}
 	}
 
-	// Метод снова асинхронный, возвращает Task. Никаких блокировок потока!
+	public override void _Process(double delta)
+	{
+		_processTimer += (float)delta;
+		if (_processTimer >= ChunkUpdateInterval)
+		{
+			_processTimer = 0f;
+			UpdateWorldChunksAroundPlayers();
+		}
+
+		// Вызов тика физики воды
+		_waterPhysicsTimer += (float)delta;
+		if (_waterPhysicsTimer >= WaterTickRate)
+		{
+			_waterPhysicsTimer = 0f;
+			ProcessWaterPhysics();
+		}
+	}
+
+	public override void _UnhandledInput(InputEvent @event)
+	{
+		if (@event is InputEventKey keyEvent && keyEvent.Pressed && keyEvent.Keycode == Key.F11)
+		{
+			if (DisplayServer.WindowGetMode() == DisplayServer.WindowMode.Fullscreen)
+				DisplayServer.WindowSetMode(DisplayServer.WindowMode.Windowed);
+			else
+				DisplayServer.WindowSetMode(DisplayServer.WindowMode.Fullscreen);
+		}
+	}
+
 	public async Task GenerateWorld()
 	{
-		// КРИТИЧЕСКИЙ НАВИГАТОР: Ждем один кадр, чтобы Godot вышел из сетевой фазы и разблокировал дерево сцены
 		await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
 		if (_noise == null)
 		{
 			_noise = new FastNoiseLite();
 			_noise.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
-			_noise.Frequency = 0.02f;
+			_noise.Frequency = 0.015f;
+		}
+
+		if (_riverNoise == null)
+		{
+			_riverNoise = new FastNoiseLite();
+			_riverNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
+			_riverNoise.Frequency = 0.007f; 
 		}
 
 		_noise.Seed = WorldSettings.CurrentSeed;
+		_riverNoise.Seed = WorldSettings.CurrentSeed + 777; 
 
+		int d = WorldSettings.RenderDistance;
 		int chunksProcessed = 0;
 
-		// 1. Генерируем данные блоков
-		for (int x = 0; x < 32; x++)
+		for (int x = -d; x <= d; x++)
 		{
-			for (int z = 0; z < 32; z++)
+			for (int z = -d; z <= d; z++)
 			{
 				GenerateChunkData(x, z);
 				chunksProcessed++;
 
-				// Чтобы игра не фризилась, даем Godot «подышать» каждые 64 чанка
-				if (chunksProcessed % 64 == 0)
+				if (chunksProcessed % 8 == 0)
 				{
 					await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 				}
 			}
 		}
 
-		// 2. Собираем меши для чанков
-		int meshesBuilt = 0;
 		foreach (var pair in _chunks)
 		{
 			pair.Value.RegenerateMesh(null);
-			meshesBuilt++;
+		}
 
-			if (meshesBuilt % 64 == 0)
+		CreateSeedLabelUI();
+		GD.Print($"[ГЕНЕРАТОР] Мир создан. Сид: {WorldSettings.CurrentSeed}");
+	}
+
+	private async void UpdateWorldChunksAroundPlayers()
+	{
+		if (_isUpdatingChunks) return;
+		_isUpdatingChunks = true;
+
+		var players = GetTree().GetNodesInGroup("Players");
+		_chunksToKeep.Clear();
+
+		foreach (Node player in players)
+		{
+			if (player is Node3D player3D)
 			{
-				await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+				Vector3 pos = player3D.GlobalPosition;
+				int pCx = Mathf.FloorToInt(pos.X / Chunk.Width);
+				int pCz = Mathf.FloorToInt(pos.Z / Chunk.Width);
+
+				int d = WorldSettings.RenderDistance;
+				for (int x = pCx - d; x <= pCx + d; x++)
+				{
+					for (int z = pCz - d; z <= pCz + d; z++)
+					{
+						_chunksToKeep.Add(new Vector2I(x, z));
+					}
+				}
 			}
 		}
 
-		CreateInvisibleBarriers();
-		CreateSeedLabelUI();
-		GD.Print($"[ГЕНЕРАТОР] Карта успешно создана. Сид: {WorldSettings.CurrentSeed}");
+		List<Vector2I> chunksToRemove = new List<Vector2I>();
+		foreach (var key in _chunks.Keys)
+		{
+			if (!_chunksToKeep.Contains(key))
+			{
+				chunksToRemove.Add(key);
+			}
+		}
+
+		foreach (var key in chunksToRemove)
+		{
+			if (_chunks.TryGetValue(key, out Chunk chunk))
+			{
+				chunk.QueueFree();
+				_chunks.Remove(key);
+			}
+		}
+
+		foreach (var targetPos in _chunksToKeep)
+		{
+			if (!_chunks.ContainsKey(targetPos))
+			{
+				GenerateChunkData(targetPos.X, targetPos.Y);
+				_chunks[targetPos].RegenerateMesh(null);
+
+				await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+				if (!IsInsideTree()) return; 
+			}
+		}
+
+		_isUpdatingChunks = false;
 	}
 
 	private void GenerateChunkData(int cx, int cz)
@@ -93,7 +203,6 @@ public partial class WorldGenerator : Node3D
 		chunk.ChunkZ = cz;
 		chunk.Name = $"Chunk_{cx}_{cz}";
 		
-		// ЧИСТЫЙ КОД: Задаем локальную позицию ДО добавления в дерево. Это убирает ошибку !is_inside_tree()
 		chunk.Position = new Vector3(cx * Chunk.Width, 0, cz * Chunk.Width);
 		AddChild(chunk);
 		
@@ -106,29 +215,64 @@ public partial class WorldGenerator : Node3D
 			for (int z = 0; z < Chunk.Width; z++)
 			{
 				int height = 5; 
+				int globalX = cx * Chunk.Width + x;
+				int globalZ = cz * Chunk.Width + z;
 
-				if (WorldSettings.CurrentMode == WorldSettings.GeneratorMode.Normal)
+				// ИСКЛЮЧЕНИЕ ДЛЯ ПЛОСКОГО МИРА — Строго сухой и плоский!
+				if (WorldSettings.CurrentMode == WorldSettings.GeneratorMode.Flat)
 				{
-					int globalX = cx * Chunk.Width + x;
-					int globalZ = cz * Chunk.Width + z;
-
-					float noiseVal = _noise.GetNoise2D(globalX, globalZ);
-					height = Mathf.FloorToInt((noiseVal + 1f) * 0.5f * 25) + 10; 
+					height = 5;
+					for (int y = 0; y < Chunk.Height; y++)
+					{
+						if (y == 0)
+							chunk.Blocks[x, y, z] = 1; // Бедрок
+						else if (y == height - 1)
+							chunk.Blocks[x, y, z] = 3; // Трава
+						else if (y < height - 1)
+							chunk.Blocks[x, y, z] = 2; // Камень
+						else
+							chunk.Blocks[x, y, z] = 0; // Воздух
+					}
+					continue; 
 				}
+
+				// Нормальный мир с реками на поверхности
+				float noiseVal = _noise.GetNoise2D(globalX, globalZ);
+				float baseHeight = (noiseVal + 1f) * 0.5f * 22f + 13f; 
+
+				// Плавная генерация рельефа рек
+				float rNoise = _riverNoise.GetNoise2D(globalX, globalZ);
+				float absRiver = Mathf.Abs(rNoise);
+
+				if (absRiver < 0.035f) // Ширина русла
+				{
+					float intensity = 1f - (absRiver / 0.035f); // 1 в центре реки, 0 у берегов
+					// Вместо каньона, плавно прижимаем ландшафт к уровню воды
+					baseHeight = Mathf.Lerp(baseHeight, SeaLevel - 2f, intensity);
+				}
+
+				height = Mathf.FloorToInt(baseHeight);
 
 				for (int y = 0; y < Chunk.Height; y++)
 				{
 					if (y == 0)
-						chunk.Blocks[x, y, z] = 1; 
+						chunk.Blocks[x, y, z] = 1;
 					else if (y < height - 1)
-						chunk.Blocks[x, y, z] = 2; 
+						chunk.Blocks[x, y, z] = 2;
 					else if (y == height - 1)
-						chunk.Blocks[x, y, z] = 3; 
+					{
+						chunk.Blocks[x, y, z] = (height <= SeaLevel) ? (byte)2 : (byte)3;
+					}
 					else
-						chunk.Blocks[x, y, z] = 0; 
+					{
+						if (y <= SeaLevel)
+							chunk.Blocks[x, y, z] = 8; // Заливаем русло
+						else
+							chunk.Blocks[x, y, z] = 0;
+					}
 				}
-			}
-		}
+			} 
+		} 
 
 		if (WorldSettings.CurrentMode == WorldSettings.GeneratorMode.Normal)
 		{
@@ -140,23 +284,33 @@ public partial class WorldGenerator : Node3D
 					{
 						int globalX = cx * Chunk.Width + x;
 						int globalZ = cz * Chunk.Width + z;
+						
 						float noiseVal = _noise.GetNoise2D(globalX, globalZ);
-						int height = Mathf.FloorToInt((noiseVal + 1f) * 0.5f * 25) + 10;
+						float baseHeight = (noiseVal + 1f) * 0.5f * 22f + 13f;
+						float rNoise = _riverNoise.GetNoise2D(globalX, globalZ);
 
-						GrowTree(chunk, x, height, z, rand);
+						if (Mathf.Abs(rNoise) < 0.035f)
+						{
+							baseHeight = Mathf.Lerp(baseHeight, SeaLevel - 2f, 1f - (Mathf.Abs(rNoise) / 0.035f));
+						}
+						
+						int height = Mathf.FloorToInt(baseHeight);
+
+						if (height > SeaLevel && Mathf.Abs(rNoise) >= 0.035f)
+						{
+							GrowTree(chunk, x, height, z, rand);
+						}
 					}
 				}
 			}
 		}
 
-		foreach (var pair in _modifiedBlocksDict)
+		Vector2I chunkKey = new Vector2I(cx, cz);
+		if (_modifiedBlocksByChunk.TryGetValue(chunkKey, out var modifiedInChunk))
 		{
-			Vector3I globalPos = pair.Key;
-			int bcx = Mathf.FloorToInt((float)globalPos.X / Chunk.Width);
-			int bcz = Mathf.FloorToInt((float)globalPos.Z / Chunk.Width);
-
-			if (bcx == cx && bcz == cz)
+			foreach (var pair in modifiedInChunk)
 			{
+				Vector3I globalPos = pair.Key;
 				int bx = globalPos.X - cx * Chunk.Width;
 				int by = globalPos.Y;
 				int bz = globalPos.Z - cz * Chunk.Width;
@@ -164,6 +318,63 @@ public partial class WorldGenerator : Node3D
 				if (bx >= 0 && bx < Chunk.Width && by >= 0 && by < Chunk.Height && bz >= 0 && bz < Chunk.Width)
 				{
 					chunk.Blocks[bx, by, bz] = pair.Value;
+				}
+			}
+		}
+	}
+
+	// Алгоритм физики симуляции жидкостей (Исправлено: разлив идет волнами через задержку)
+	private void ProcessWaterPhysics()
+	{
+		int currentQueueCount = _waterQueue.Count;
+		if (currentQueueCount == 0) return;
+
+		int maxUpdatesPerTick = 400; // Лимит блоков за один тик, чтобы не проседал FPS
+
+		// Берем строго то количество элементов, которое БЫЛО в очереди НА НАЧАЛО этого тика.
+		// Новые сгенерированные блоки воды внутри этого цикла будут обработаны только в следующем тике!
+		int toProcess = Mathf.Min(currentQueueCount, maxUpdatesPerTick);
+
+		for (int i = 0; i < toProcess; i++)
+		{
+			if (_waterQueue.Count == 0) break;
+
+			WaterTick current = _waterQueue.Dequeue();
+
+			if (GetBlockAt(current.Position.X, current.Position.Y, current.Position.Z) != 8)
+				continue; 
+
+			// 1. Проверяем блок под водой
+			Vector3I downPos = current.Position + Vector3I.Down;
+			if (downPos.Y > 0)
+			{
+				byte downBlock = GetBlockAt(downPos.X, downPos.Y, downPos.Z);
+				if (downBlock == 0) // Под нами воздух -> падаем вниз!
+				{
+					SetBlockAt(downPos.X, downPos.Y, downPos.Z, 8, true);
+					// При падении вниз сбрасываем счетчик растекания вбок обратно на 4
+					_waterQueue.Enqueue(new WaterTick { Position = downPos, SpreadLeft = 4 });
+					continue; 
+				}
+			}
+
+			// 2. Если внизу препятствие -> пытаемся течь вбок во все 4 стороны
+			if (current.SpreadLeft > 0)
+			{
+				Vector3I[] horizontalSides = {
+					current.Position + Vector3I.Forward,
+					current.Position + Vector3I.Back,
+					current.Position + Vector3I.Left,
+					current.Position + Vector3I.Right
+				};
+
+				foreach (var side in horizontalSides)
+				{
+					if (GetBlockAt(side.X, side.Y, side.Z) == 0) // Если сбоку воздух
+					{
+						SetBlockAt(side.X, side.Y, side.Z, 8, true);
+						_waterQueue.Enqueue(new WaterTick { Position = side, SpreadLeft = current.SpreadLeft - 1 });
+					}
 				}
 			}
 		}
@@ -199,35 +410,6 @@ public partial class WorldGenerator : Node3D
 		}
 	}
 
-	private void CreateInvisibleBarriers()
-	{
-		float mapSize = 32 * Chunk.Width;
-		float center = mapSize / 2f;
-
-		Vector3 horizSize = new Vector3(mapSize, 256f, 2f);
-		Vector3 vertSize = new Vector3(2f, 256f, mapSize);
-
-		AddBarrierWall(new Vector3(center, 128f, 0f), horizSize);         
-		AddBarrierWall(new Vector3(center, 128f, mapSize), horizSize);    
-		AddBarrierWall(new Vector3(0f, 128f, center), vertSize);         
-		AddBarrierWall(new Vector3(mapSize, 128f, center), vertSize);    
-	}
-
-	private void AddBarrierWall(Vector3 position, Vector3 size)
-	{
-		StaticBody3D wall = new StaticBody3D();
-		CollisionShape3D shape = new CollisionShape3D();
-		BoxShape3D box = new BoxShape3D();
-		
-		box.Size = size;
-		shape.Shape = box;
-		wall.AddChild(shape);
-		
-		// ЧИСТЫЙ КОД: Задаем позицию ДО AddChild
-		wall.Position = position;
-		AddChild(wall); 
-	}
-
 	private void CreateSeedLabelUI()
 	{
 		CanvasLayer canvas = new CanvasLayer();
@@ -239,12 +421,26 @@ public partial class WorldGenerator : Node3D
 		AddChild(canvas);
 	}
 
+	// ПЕРЕГРУЗКА: Этот метод вызывается Игроком и внешними скриптами
 	public void SetBlockAt(int globalX, int globalY, int globalZ, byte type)
+	{
+		SetBlockAt(globalX, globalY, globalZ, type, false);
+	}
+
+	// ОСНОВНОЙ МЕТОД: Используется внутри симуляции физики и перегрузки
+	public void SetBlockAt(int globalX, int globalY, int globalZ, byte type, bool fromPhysics)
 	{
 		int cx = Mathf.FloorToInt((float)globalX / Chunk.Width);
 		int cz = Mathf.FloorToInt((float)globalZ / Chunk.Width);
 
 		Vector2I key = new Vector2I(cx, cz);
+		Vector3I globalPos = new Vector3I(globalX, globalY, globalZ);
+		_modifiedBlocksDict[globalPos] = type;
+
+		if (!_modifiedBlocksByChunk.ContainsKey(key))
+			_modifiedBlocksByChunk[key] = new Dictionary<Vector3I, byte>();
+		_modifiedBlocksByChunk[key][globalPos] = type;
+
 		if (_chunks.ContainsKey(key))
 		{
 			Chunk chunk = _chunks[key];
@@ -256,13 +452,72 @@ public partial class WorldGenerator : Node3D
 			{
 				if (type == 0 && chunk.Blocks[bx, by, bz] == 1) return;
 				chunk.Blocks[bx, by, bz] = type;
-
-				Vector3I globalPos = new Vector3I(globalX, globalY, globalZ);
-				_modifiedBlocksDict[globalPos] = type;
-
 				chunk.RegenerateMesh(null);
+
+				// Если поставлена вода И это ручная установка ведра (НЕ симуляция физики)
+				if (type == 8 && !fromPhysics)
+				{
+					_waterQueue.Enqueue(new WaterTick { Position = globalPos, SpreadLeft = 4 });
+				}
+
+				// Если блок уничтожен (стал воздухом), будим соседнюю воду, чтобы она текла сюда
+				if (type == 0)
+				{
+					Vector3I[] neighbors = {
+						globalPos + Vector3I.Up,
+						globalPos + Vector3I.Forward,
+						globalPos + Vector3I.Back,
+						globalPos + Vector3I.Left,
+						globalPos + Vector3I.Right
+					};
+
+					foreach (var n in neighbors)
+					{
+						if (GetBlockAt(n.X, n.Y, n.Z) == 8)
+						{
+							_waterQueue.Enqueue(new WaterTick { Position = n, SpreadLeft = 4 });
+						}
+					}
+				}
+
+				// УБИРАЕМ КУБИЧЕСКИЕ БАРЬЕРЫ
+				if (bx == 0) NotifyChunkToUpdate(cx - 1, cz);
+				if (bx == Chunk.Width - 1) NotifyChunkToUpdate(cx + 1, cz);
+				if (bz == 0) NotifyChunkToUpdate(cx, cz - 1);
+				if (bz == Chunk.Width - 1) NotifyChunkToUpdate(cx, cz + 1);
 			}
 		}
+	}
+
+	private void NotifyChunkToUpdate(int cx, int cz)
+	{
+		Vector2I neighborKey = new Vector2I(cx, cz);
+		if (_chunks.TryGetValue(neighborKey, out Chunk neighborChunk))
+		{
+			neighborChunk.RegenerateMesh(null);
+		}
+	}
+	
+	public byte GetBlockAt(int globalX, int globalY, int globalZ)
+	{
+		if (globalY < 0 || globalY >= Chunk.Height) return 0;
+
+		int cx = Mathf.FloorToInt((float)globalX / Chunk.Width);
+		int cz = Mathf.FloorToInt((float)globalZ / Chunk.Width);
+		Vector2I key = new Vector2I(cx, cz);
+
+		if (_chunks.TryGetValue(key, out Chunk chunk))
+		{
+			int bx = globalX - cx * Chunk.Width;
+			int by = globalY;
+			int bz = globalZ - cz * Chunk.Width;
+
+			if (bx >= 0 && bx < Chunk.Width && by >= 0 && by < Chunk.Height && bz >= 0 && bz < Chunk.Width)
+			{
+				return chunk.Blocks[bx, by, bz];
+			}
+		}
+		return 0;
 	}
 
 	public void SaveWorldData()
@@ -276,11 +531,27 @@ public partial class WorldGenerator : Node3D
 
 			string filePath = System.IO.Path.Combine(WorldSettings.SaveFolderPath, $"{WorldSettings.CurrentWorldName}.json");
 
+			float pX = 0f, pY = 70f, pZ = 0f;
+			var players = GetTree().GetNodesInGroup("Players");
+			foreach (Node player in players)
+			{
+				if (player is CharacterBody3D player3D && player3D.IsMultiplayerAuthority())
+				{
+					pX = player3D.GlobalPosition.X;
+					pY = player3D.GlobalPosition.Y;
+					pZ = player3D.GlobalPosition.Z;
+					break;
+				}
+			}
+
 			WorldSaveModel saveModel = new WorldSaveModel
 			{
 				WorldName = WorldSettings.CurrentWorldName,
 				Seed = WorldSettings.CurrentSeed,
 				Mode = (int)WorldSettings.CurrentMode,
+				PlayerX = pX,
+				PlayerY = pY,
+				PlayerZ = pZ,
 				ModifiedBlocks = new List<BlockSaveData>()
 			};
 
@@ -297,11 +568,10 @@ public partial class WorldGenerator : Node3D
 
 			string jsonString = JsonSerializer.Serialize(saveModel);
 			File.WriteAllText(filePath, jsonString);
-			GD.Print($"[УСПЕХ] Мир сохранен в папку лаунчера: {filePath}");
 		}
 		catch (Exception e)
 		{
-			GD.PrintErr($"[ОШИБКА СОХРАНЕНИЯ] Не удалось записать файл: {e.Message}");
+			GD.PrintErr($"[ОШИБКА СОХРАНЕНИЯ] {e.Message}");
 		}
 	}
 
@@ -311,7 +581,6 @@ public partial class WorldGenerator : Node3D
 
 		if (!File.Exists(filePath))
 		{
-			GD.Print($"[Загрузка] Файл сохранения {filePath} не найден. Создается новый мир.");
 			return;
 		}
 
@@ -324,34 +593,30 @@ public partial class WorldGenerator : Node3D
 			{
 				WorldSettings.CurrentSeed = saveModel.Seed;
 				WorldSettings.CurrentMode = (WorldSettings.GeneratorMode)saveModel.Mode;
+				WorldSettings.SavedPlayerPosition = new Vector3(saveModel.PlayerX, saveModel.PlayerY, saveModel.PlayerZ);
 
 				_modifiedBlocksDict.Clear();
+				_modifiedBlocksByChunk.Clear();
+
 				foreach (var blockData in saveModel.ModifiedBlocks)
 				{
 					Vector3I pos = new Vector3I(blockData.X, blockData.Y, blockData.Z);
 					_modifiedBlocksDict[pos] = blockData.Type;
+
+					int bcx = Mathf.FloorToInt((float)pos.X / Chunk.Width);
+					int bcz = Mathf.FloorToInt((float)pos.Z / Chunk.Width);
+					Vector2I chunkKey = new Vector2I(bcx, bcz);
+
+					if (!_modifiedBlocksByChunk.ContainsKey(chunkKey))
+						_modifiedBlocksByChunk[chunkKey] = new Dictionary<Vector3I, byte>();
+					
+					_modifiedBlocksByChunk[chunkKey][pos] = blockData.Type;
 				}
-				GD.Print($"[УСПЕХ] Мир {WorldSettings.CurrentWorldName} успешно загружен!");
 			}
 		}
 		catch (Exception e)
 		{
-			GD.PrintErr($"[ОШИБКА ЗАГРУЗКИ] Не удалось прочитать файл: {e.Message}");
-		}
-	}
-
-	public override void _UnhandledInput(InputEvent @event)
-	{
-		if (@event is InputEventKey keyEvent && keyEvent.Pressed && keyEvent.Keycode == Key.F11)
-		{
-			if (DisplayServer.WindowGetMode() == DisplayServer.WindowMode.Fullscreen)
-			{
-				DisplayServer.WindowSetMode(DisplayServer.WindowMode.Windowed);
-			}
-			else
-			{
-				DisplayServer.WindowSetMode(DisplayServer.WindowMode.Fullscreen);
-			}
+			GD.PrintErr($"[ОШИБКА ЗАГРУЗКИ] {e.Message}");
 		}
 	}
 }

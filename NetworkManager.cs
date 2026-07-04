@@ -3,7 +3,6 @@ using System;
 
 public partial class NetworkManager : Node
 {
-	// Статическая ссылка, чтобы легко вызывать сетевые методы из других скриптов
 	public static NetworkManager Instance { get; private set; }
 
 	[Export] public PackedScene PlayerScene; 
@@ -13,12 +12,11 @@ public partial class NetworkManager : Node
 
 	public override void _Ready()
 	{
-		Instance = this; // Инициализируем синглтон
+		Instance = this;
 
 		Multiplayer.PeerConnected += OnPeerConnected;
 		Multiplayer.PeerDisconnected += OnPeerDisconnected;
 		
-		// Сигналы для контроля подключения клиента
 		Multiplayer.ConnectedToServer += OnConnectedToServer;
 		Multiplayer.ConnectionFailed += OnConnectionFailed;
 		Multiplayer.ServerDisconnected += OnServerDisconnected;
@@ -51,7 +49,6 @@ public partial class NetworkManager : Node
 
 	public void HostGame()
 	{
-		// Проверяем, запущен ли уже реальный ENet сервер, игнорируя встроенный офлайн-пир Godot
 		if (Multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer && enetPeer.GetConnectionStatus() != MultiplayerPeer.ConnectionStatus.Disconnected)
 		{
 			GD.Print("[СЕТЬ] Сервер уже работает.");
@@ -144,34 +141,22 @@ public partial class NetworkManager : Node
 	[Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
 	private void ClientIsReadyToSpawn()
 	{
+		if (!Multiplayer.IsServer()) return;
+
 		long clientId = Multiplayer.GetRemoteSenderId();
 		GD.Print($"[СЕТЬ] Клиент {clientId} полностью готов. Спавним его персонажа.");
 		
+		// Сервер создает ноду. MultiplayerSpawner сам передаст её клиенту вместе с координатами!
 		SpawnPlayer(clientId);
 
-		float centerCoordinate = (32 * Chunk.Width) / 2f;
-		Vector3 spawnPos = new Vector3(centerCoordinate, Chunk.Height + 5f, centerCoordinate);
-		
-		RpcId(clientId, nameof(ForceClientPosition), spawnPos);
+		// Просто говорим клиенту, что всё готово, и можно убирать загрузочный экран
+		RpcId(clientId, nameof(OnClientSpawnSuccess));
 	}
 
-	[Rpc(MultiplayerApi.RpcMode.Authority)]
-	private void ForceClientPosition(Vector3 position)
+	[Rpc(MultiplayerApi.RpcMode.Authority, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
+	private void OnClientSpawnSuccess()
 	{
-		CallDeferred(nameof(DeferredSetPosition), position);
-	}
-
-	private void DeferredSetPosition(Vector3 position)
-	{
-		foreach (Node player in GetTree().GetNodesInGroup("Players"))
-		{
-			if (player is Node3D player3D && player3D.GetMultiplayerAuthority() == Multiplayer.GetUniqueId())
-			{
-				player3D.GlobalPosition = position;
-				GD.Print("[СЕТЬ] Персонаж установлен на точку спавна. Игра началась!");
-				break;
-			}
-		}
+		GD.Print("[СЕТЬ] Спавн успешно завершен! Игра началась.");
 		HideLoadingScreen();
 	}
 
@@ -179,7 +164,6 @@ public partial class NetworkManager : Node
 	{
 		GD.Print($"[СЕТЬ] Игрок {id} отключился. Удаляем его модельку...");
 		
-		// ИСПРАВЛЕНО: Ищем игрока по его реальному Сетевому ID в группе, а не по имени ноды
 		foreach (Node player in GetTree().GetNodesInGroup("Players"))
 		{
 			if (player is Node3D player3D && player3D.GetMultiplayerAuthority() == id)
@@ -196,13 +180,9 @@ public partial class NetworkManager : Node
 		if (PlayerScene == null)
 		{
 			if (ResourceLoader.Exists("res://player.tscn"))
-			{
 				PlayerScene = GD.Load<PackedScene>("res://player.tscn");
-			}
 			else
-			{
 				PlayerScene = GD.Load<PackedScene>("res://Player.tscn");
-			}
 		}
 
 		if (PlayerScene == null)
@@ -217,52 +197,57 @@ public partial class NetworkManager : Node
 		player.Name = id.ToString();
 		player.SetMultiplayerAuthority((int)id);
 		
-		// ИСПРАВЛЕНО: Добавляем игрока в специальную группу для точного отслеживания сети
-		player.AddToGroup("Players");
+		// Дублируем добавление в группу здесь, НО обязательно добавь AddToGroup("Players") в скрипт Player.cs!
+		player.AddToGroup("Players"); 
 		
-		float centerCoordinate = (32 * Chunk.Width) / 2f;
-		player.Position = new Vector3(centerCoordinate, Chunk.Height + 5f, centerCoordinate); 
+		// Задаем стартовую позицию в центре мира
+		player.Position = new Vector3(0f, Chunk.Height + 5f, 0f); 
 		
-		GetTree().CurrentScene.CallDeferred(Node.MethodName.AddChild, player);
+		GetTree().CurrentScene.AddChild(player);
 		GD.Print($"[СЕТЬ] Игрок {id} успешно заспавнен в координатах {player.Position}");
 	}
 
 	// ========================================================
-	// СИНХРОНИЗАЦИЯ БЛОКОВ (НОВЫЙ ФУНКЦИОНАЛ ДЛЯ ВЕРСИИ 1.4.1)
+	// СИНХРОНИЗАЦИЯ БЛОКОВ (ИСПРАВЛЕНО ДЛЯ ХОСТА И КЛИЕНТОВ)
 	// ========================================================
 
-	// Вызывай этот метод из скрипта ломания/копания блоков игрока вместо прямого обращения к генератору!
 	public void ChallengeBlockChange(Vector3I blockCoords, int blockType)
 	{
-		// Если мы подключены к сети — шлем RPC запрос
 		if (Multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer && enetPeer.GetConnectionStatus() == MultiplayerPeer.ConnectionStatus.Connected)
 		{
-			Rpc(nameof(ServerChangeBlockRpc), blockCoords, blockType);
+			if (Multiplayer.IsServer())
+			{
+				// ЕСЛИ ЭТО ХОСТ: ему не нужно слать RPC самому себе!
+				// Он сразу командует ВСЕМ (включая себя через CallLocal) обновить блок
+				Rpc(nameof(BroadcastBlockChangeRpc), blockCoords, blockType);
+			}
+			else
+			{
+				// ЕСЛИ ЭТО КЛИЕНТ: он отправляет запрос на сервер (ID 1)
+				RpcId(1, nameof(RequestBlockChangeRpc), blockCoords, blockType);
+			}
 		}
 		else
 		{
-			// Если играем в одиночку — просто меняем блок на месте
+			// Одиночная игра
 			ApplyBlockChangeLocally(blockCoords, blockType);
 		}
 	}
 
 	[Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
-	private void ServerChangeBlockRpc(Vector3I blockCoords, int blockType)
+	private void RequestBlockChangeRpc(Vector3I blockCoords, int blockType)
 	{
+		// На всякий случай проверяем, что метод выполняет сервер
 		if (!Multiplayer.IsServer()) return;
 
-		// Сервер меняет у себя
-		ApplyBlockChangeLocally(blockCoords, blockType);
-		// И принудительно рассылает всем клиентам
-		Rpc(nameof(ClientChangeBlockRpc), blockCoords, blockType);
+		// Сервер принял запрос от клиента и пускает волну перерисовки для ВСЕХ участников
+		Rpc(nameof(BroadcastBlockChangeRpc), blockCoords, blockType);
 	}
 
-	[Rpc(MultiplayerApi.RpcMode.Authority, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
-	private void ClientChangeBlockRpc(Vector3I blockCoords, int blockType)
+	// CallLocal = true гарантирует, что метод выполнится и на сервере, и на всех клиентах
+	[Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
+	private void BroadcastBlockChangeRpc(Vector3I blockCoords, int blockType)
 	{
-		if (Multiplayer.IsServer()) return; // Сервер уже применил это у себя ранее
-		
-		// Клиенты меняют у себя
 		ApplyBlockChangeLocally(blockCoords, blockType);
 	}
 
@@ -271,16 +256,12 @@ public partial class NetworkManager : Node
 		var worldGenerator = GetTree().CurrentScene as WorldGenerator;
 		if (worldGenerator != null)
 		{
-			// !!! ВНИМАНИЕ: Замени метод ниже на РЕАЛЬНОЕ название метода установки блоков в твоем скрипте WorldGenerator !!!
-			// Например, если у тебя метод принимает три инта: worldGenerator.SetBlock(blockCoords.X, blockCoords.Y, blockCoords.Z, blockType);
-			// Или если принимает Vector3I: worldGenerator.SetBlock(blockCoords, blockType);
-			
-			// worldGenerator.SetBlock(blockCoords, blockType); 
+			worldGenerator.SetBlockAt(blockCoords.X, blockCoords.Y, blockCoords.Z, (byte)blockType); 
 			GD.Print($"[БЛОКИ] Изменен блок в точке {blockCoords} на тип {blockType}");
 		}
 	}
 
-	// === ИНТЕРФЕЙС ЗАГРУЗКИ (ENGLISH) ===
+	// === ИНТЕРФЕЙС ЗАГРУЗКИ ===
 
 	private void ShowLoadingScreen(string message)
 	{

@@ -12,8 +12,12 @@ public partial class Chunk : StaticBody3D
 	public int ChunkX { get; set; }
 	public int ChunkZ { get; set; }
 
-	private MeshInstance3D _meshInstance;
+	private MeshInstance3D _opaqueMeshInstance; 
+	private MeshInstance3D _waterMeshInstance;  
 	private CollisionShape3D _collisionShape;
+
+	private static StandardMaterial3D _opaqueMaterial;
+	private static StandardMaterial3D _waterMaterial;
 
 	private static readonly Vector3I[] Directions = new Vector3I[]
 	{
@@ -27,16 +31,71 @@ public partial class Chunk : StaticBody3D
 
 	public override void _Ready()
 	{
-		_meshInstance = new MeshInstance3D();
+		_opaqueMeshInstance = new MeshInstance3D();
+		_waterMeshInstance = new MeshInstance3D();
 		_collisionShape = new CollisionShape3D();
-		AddChild(_meshInstance);
+		
+		AddChild(_opaqueMeshInstance);
+		AddChild(_waterMeshInstance);
 		AddChild(_collisionShape);
+	}
+
+	private static void InitializeGlobalMaterials()
+	{
+		if (_opaqueMaterial != null && _waterMaterial != null) return;
+
+		string[] paths = new string[]
+		{
+			"res://textures/bedrock.png",         
+			"res://textures/stone.png",           
+			"res://textures/dirt.png",            
+			"res://textures/grassblock_top.png",  
+			"res://textures/grassblock_side.png", 
+			"res://textures/oaklog_side.png",     
+			"res://textures/oaklog_top.png",      
+			"res://textures/leaves.png",          
+			"res://textures/oakplanks.png",       
+			"res://textures/obsidian.png",        
+			"res://textures/water.png"            
+		};
+
+		Image atlasImage = Image.CreateEmpty(paths.Length * 16, 16, false, Image.Format.Rgba8);
+		for (int i = 0; i < paths.Length; i++)
+		{
+			if (ResourceLoader.Exists(paths[i]))
+			{
+				Image img = GD.Load<Texture2D>(paths[i]).GetImage();
+				atlasImage.BlitRect(img, new Rect2I(0, 0, 16, 16), new Vector2I(i * 16, 0));
+			}
+		}
+		ImageTexture texture = ImageTexture.CreateFromImage(atlasImage);
+
+		_opaqueMaterial = new StandardMaterial3D();
+		_opaqueMaterial.AlbedoTexture = texture;
+		_opaqueMaterial.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest;
+		_opaqueMaterial.Roughness = 1.0f;
+		_opaqueMaterial.Transparency = BaseMaterial3D.TransparencyEnum.Disabled;
+
+		_waterMaterial = new StandardMaterial3D();
+		_waterMaterial.AlbedoTexture = texture;
+		_waterMaterial.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest;
+		_waterMaterial.Roughness = 0.2f; 
+		_waterMaterial.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
+		_waterMaterial.AlbedoColor = new Color(1f, 1f, 1f, 0.65f); 
 	}
 
 	public void RegenerateMesh(Dictionary<byte, StandardMaterial3D> materials)
 	{
-		var st = new SurfaceTool();
-		st.Begin(Mesh.PrimitiveType.Triangles);
+		InitializeGlobalMaterials();
+
+		var stOpaque = new SurfaceTool();
+		stOpaque.Begin(Mesh.PrimitiveType.Triangles);
+
+		var stWater = new SurfaceTool();
+		stWater.Begin(Mesh.PrimitiveType.Triangles);
+
+		bool hasOpaqueGeometry = false;
+		bool hasWaterGeometry = false;
 
 		for (int x = 0; x < Width; x++)
 		{
@@ -49,73 +108,91 @@ public partial class Chunk : StaticBody3D
 
 					for (int i = 0; i < 6; i++)
 					{
-						int nx = x + Directions[i].X;
-						int ny = y + Directions[i].Y;
-						int nz = z + Directions[i].Z;
-
-						if (IsAir(nx, ny, nz))
+						if (ShouldRenderFace(x, y, z, blockType, i))
 						{
-							AddFace(st, x, y, z, i, blockType);
+							if (blockType == 8) 
+							{
+								AddFace(stWater, x, y, z, i, blockType);
+								hasWaterGeometry = true;
+							}
+							else 
+							{
+								AddFace(stOpaque, x, y, z, i, blockType);
+								hasOpaqueGeometry = true;
+							}
 						}
 					}
 				}
 			}
 		}
 
-		ArrayMesh mesh = st.Commit();
-		_meshInstance.Mesh = mesh;
-
-		// ЗАГРУЗКА И СКЛЕЙКА ТЕКСТУР В РЕЖИМЕ РЕАЛЬНОГО ВРЕМЕНИ
-		var globalMat = new StandardMaterial3D();
-
-		string[] paths = new string[]
+		if (hasOpaqueGeometry)
 		{
-			"res://textures/bedrock.png",         // 0
-			"res://textures/stone.png",           // 1
-			"res://textures/dirt.png",            // 2
-			"res://textures/grassblock_top.png",  // 3
-			"res://textures/grassblock_side.png", // 4
-			"res://textures/oaklog_side.png",     // 5
-			"res://textures/oaklog_top.png",      // 6
-			"res://textures/leaves.png",          // 7
-			"res://textures/oakplanks.png",       // 8
-			"res://textures/obsidian.png"         // 9
-		};
-
-		// Создаем пустой большой холст в памяти (16 пикселей в высоту, 160 в ширину для 10 текстур)
-		Image atlasImage = Image.CreateEmpty(160, 16, false, Image.Format.Rgba8);
-
-		for (int i = 0; i < paths.Length; i++)
-		{
-			Image img = GD.Load<Texture2D>(paths[i]).GetImage();
-			// Копируем маленькую текстуру на нужное место в общем атласе
-			atlasImage.BlitRect(img, new Rect2I(0, 0, 16, 16), new Vector2I(i * 16, 0));
-		}
-
-		ImageTexture texture = ImageTexture.CreateFromImage(atlasImage);
-
-		globalMat.AlbedoTexture = texture;
-		globalMat.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest; 
-		globalMat.Roughness = 1.0f;
-
-		_meshInstance.MaterialOverride = globalMat;
-
-		if (mesh.GetSurfaceCount() > 0)
-		{
-			_collisionShape.Shape = mesh.CreateTrimeshShape();
+			ArrayMesh opaqueMesh = stOpaque.Commit();
+			_opaqueMeshInstance.Mesh = opaqueMesh;
+			_opaqueMeshInstance.MaterialOverride = _opaqueMaterial;
+			_collisionShape.Shape = opaqueMesh.CreateTrimeshShape();
 		}
 		else
 		{
+			_opaqueMeshInstance.Mesh = null;
 			_collisionShape.Shape = null;
+		}
+
+		if (hasWaterGeometry)
+		{
+			_waterMeshInstance.Mesh = stWater.Commit();
+			_waterMeshInstance.MaterialOverride = _waterMaterial;
+		}
+		else
+		{
+			_waterMeshInstance.Mesh = null;
 		}
 	}
 
-	private bool IsAir(int x, int y, int z)
+	private bool ShouldRenderFace(int x, int y, int z, byte currentBlock, int direction)
 	{
-		if (x < 0 || x >= Width || y < 0 || y >= Height || z < 0 || z >= Width)
-			return true;
-		
-		return Blocks[x, y, z] == 0;
+		int nx = x + Directions[direction].X;
+		int ny = y + Directions[direction].Y;
+		int nz = z + Directions[direction].Z;
+
+		if (ny < 0 || ny >= Height) return true;
+
+		byte neighborBlock = 0;
+
+		// Фикс барьера: Если выходим за рамки чанка, честно спрашиваем блок у WorldGenerator
+		if (nx < 0 || nx >= Width || nz < 0 || nz >= Width)
+		{
+			int globalX = ChunkX * Width + nx;
+			int globalY = ny;
+			int globalZ = ChunkZ * Width + nz;
+
+			var generator = GetParent<WorldGenerator>();
+			if (generator != null)
+			{
+				neighborBlock = generator.GetBlockAt(globalX, globalY, globalZ);
+			}
+			else
+			{
+				return true;
+			}
+		}
+		else
+		{
+			neighborBlock = Blocks[nx, ny, nz];
+		}
+
+		if (neighborBlock == 0) return true; 
+
+		if (currentBlock == 8)
+		{
+			// Вода скрывает грань, если рядом тоже вода (включая воду в соседнем чанке!)
+			return neighborBlock == 0;
+		}
+
+		if (neighborBlock == 8) return true;
+
+		return false; 
 	}
 
 	private void AddFace(SurfaceTool st, int x, int y, int z, int direction, byte blockType)
@@ -124,24 +201,24 @@ public partial class Chunk : StaticBody3D
 
 		switch (blockType)
 		{
-			case 1: textureSlot = 0; break; // Бедрок
-			case 2: textureSlot = 1; break; // Камень
-			case 3: // Трава
-				if (direction == 4)      textureSlot = 3; // Верх
-				else if (direction == 5) textureSlot = 2; // Низ
-				else                     textureSlot = 4; // Бока
+			case 1: textureSlot = 0; break; 
+			case 2: textureSlot = 1; break; 
+			case 3: 
+				if (direction == 4)      textureSlot = 3; 
+				else if (direction == 5) textureSlot = 2; 
+				else                     textureSlot = 4; 
 				break;
-			case 4: // Бревно
-				if (direction == 4 || direction == 5) textureSlot = 6; // Верх/Низ
-				else                                  textureSlot = 5; // Бока
+			case 4: 
+				if (direction == 4 || direction == 5) textureSlot = 6;
+				else                                  textureSlot = 5;
 				break;
-			case 5: textureSlot = 7; break; // Листва
-			case 6: textureSlot = 8; break; // Доски
-			case 7: textureSlot = 9; break; // Обсидиан
+			case 5: textureSlot = 7; break;  
+			case 6: textureSlot = 8; break;  
+			case 7: textureSlot = 9; break;  
+			case 8: textureSlot = 10; break; 
 		}
 
-		// Всего у нас 10 текстур, значит шаг одной картинки в UV-координатах = 1 / 10 = 0.1
-		float step = 0.1f;
+		float step = 1f / 11f; 
 		float uStart = textureSlot * step;
 		float uEnd = uStart + step;
 

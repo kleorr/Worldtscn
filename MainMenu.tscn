@@ -1,6 +1,7 @@
 [gd_scene format=3 uid="uid://7u2n4evcmypg"]
 
 [ext_resource type="Script" uid="uid://dv5gmd0xax30" path="res://MainMenu.cs" id="1_i26rj"]
+[ext_resource type="Texture2D" uid="uid://087ginqb1yv8" path="res://textures/mainmenuimage.png" id="2_eiy7p"]
 
 [node name="MainMenu" type="Control" unique_id=98756483]
 layout_mode = 3
@@ -10,6 +11,15 @@ anchor_bottom = 1.0
 grow_horizontal = 2
 grow_vertical = 2
 script = ExtResource("1_i26rj")
+
+[node name="TextureRect" type="TextureRect" parent="." unique_id=1725641369]
+layout_mode = 0
+offset_left = -117.0
+offset_top = -6.0
+offset_right = 1255.0
+offset_bottom = 660.0
+texture = ExtResource("2_eiy7p")
+expand_mode = 1
 
 [node name="VBoxContainer" type="VBoxContainer" parent="." unique_id=635954389]
 layout_mode = 0

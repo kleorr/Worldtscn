@@ -13,6 +13,13 @@ sky_material = SubResource("PhysicalSkyMaterial_50wdj")
 background_mode = 2
 background_color = Color(0.80784315, 0, 0.5058824, 0.34901962)
 sky = SubResource("Sky_hynfd")
+fog_enabled = true
+fog_mode = 1
+fog_light_color = Color(1, 1, 1, 1)
+fog_light_energy = 0.51
+fog_density = 1.0
+fog_depth_begin = 86.3
+fog_depth_end = 149.0
 
 [sub_resource type="StandardMaterial3D" id="StandardMaterial3D_hynfd"]
 transparency = 1
@@ -89,6 +96,16 @@ text = "Save World"
 [node name="ExitButton" type="Button" parent="PauseMenu/VBoxContainer" unique_id=92735314]
 layout_mode = 2
 text = "Exit to Main Menu"
+
+[node name="RenderDistanceLabel" type="Label" parent="PauseMenu/VBoxContainer" unique_id=114242558]
+layout_mode = 2
+text = "RenderDistanceLabel"
+
+[node name="RenderDistanceSlider" type="HSlider" parent="PauseMenu/VBoxContainer" unique_id=297491828]
+layout_mode = 2
+min_value = 2.0
+max_value = 16.0
+value = 2.0
 
 [node name="NetworkManager" type="Node" parent="." unique_id=566689246]
 script = ExtResource("3_aqk2v")

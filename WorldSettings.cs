@@ -16,8 +16,12 @@ public static class WorldSettings
 	public static GeneratorMode CurrentMode = GeneratorMode.Normal;
 	public static bool IsLoadingExistingWorld = false;
 
+	// НАСТРОЙКИ ОПТИМИЗАЦИИ МИРА
+	public static int RenderDistance = 6; // Дальность прорисовки в чанках вокруг игрока
+
 	// СЕТЕВЫЕ ПЕРЕМЕННЫЕ
 	public static bool IsMultiplayerClient = false; // Заходим ли мы как клиент
 	public static string ServerIp = "127.0.0.1";    // IP сервера для подключения
-	public static Godot.Vector3 SpawnPoint = new Godot.Vector3(0, 30, 0);
+	public static Godot.Vector3 SpawnPoint = new Godot.Vector3(0, 70, 0); // Спавн в центре бесконечного мира
+	public static Godot.Vector3 SavedPlayerPosition = new Godot.Vector3(0f, 70f, 0f);
 }

@@ -10,11 +10,11 @@ config_version=5
 
 [application]
 
-config/name="Worldtscn 1.4.1"
+config/name="Worldtscn 1.5"
 run/main_scene="uid://7u2n4evcmypg"
 config/features=PackedStringArray("4.7", "C#", "Mobile")
 boot_splash/show_image=false
-config/icon="res://icon.svg"
+config/icon="uid://bl1l6s0qt4ppm"
 
 [display]
 
