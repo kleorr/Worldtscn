@@ -26,31 +26,37 @@ public partial class WorldGenerator : Node3D
 		public List<BlockSaveData> ModifiedBlocks { get; set; }
 	}
 
-	// Структура для обсчёта физики растекания воды
-	public struct WaterTick
-	{
-		public Vector3I Position;
-		public int SpreadLeft; // Сколько блоков вбок вода ещё может пройти (макс. 4)
-	}
-
-	private Dictionary<Vector3I, byte> _modifiedBlocksDict = new Dictionary<Vector3I, byte>();
-	private Dictionary<Vector2I, Dictionary<Vector3I, byte>> _modifiedBlocksByChunk = new Dictionary<Vector2I, Dictionary<Vector3I, byte>>();
+	private readonly Dictionary<Vector3I, byte> _modifiedBlocksDict = new Dictionary<Vector3I, byte>();
+	private readonly Dictionary<Vector2I, Dictionary<Vector3I, byte>> _modifiedBlocksByChunk = new Dictionary<Vector2I, Dictionary<Vector3I, byte>>();
+	private readonly Dictionary<Vector2I, Chunk> _chunks = new Dictionary<Vector2I, Chunk>();
 	
-	private Dictionary<Vector2I, Chunk> _chunks = new Dictionary<Vector2I, Chunk>();
-	private FastNoiseLite _noise;
-	private FastNoiseLite _riverNoise; 
+	private FastNoiseLite _noise;          
+	private FastNoiseLite _mountainNoise;  
+	private FastNoiseLite _riverNoise;     
+	private FastNoiseLite _oceanNoise;     
 
 	private float _processTimer = 0f;
-	private const float ChunkUpdateInterval = 0.4f;
+	private const float ChunkUpdateInterval = 0.15f;
 	private bool _isUpdatingChunks = false;
-	private HashSet<Vector2I> _chunksToKeep = new HashSet<Vector2I>();
+	private readonly HashSet<Vector2I> _chunksToKeep = new HashSet<Vector2I>();
+	private Vector2I _lastPlayerChunk = new Vector2I(int.MinValue, int.MinValue);
 	
-	private const int SeaLevel = 14; 
+	private const int SeaLevel = 24; 
 
-	// Физика воды
-	private Queue<WaterTick> _waterQueue = new Queue<WaterTick>();
+	private Queue<Vector3I> _currentWaterQueue = new Queue<Vector3I>();
+	private Queue<Vector3I> _nextWaterQueue = new Queue<Vector3I>();
+	private readonly HashSet<Vector3I> _queuedWaterPositions = new HashSet<Vector3I>();
+	private readonly HashSet<Vector2I> _dirtyChunksThisTick = new HashSet<Vector2I>();
 	private float _waterPhysicsTimer = 0f;
-	private const float WaterTickRate = 0.25f; // Задержка обновления воды (0.25с — строго как 5 тиков в Майнкрафте!)
+	private const float WaterTickRate = 0.15f; 
+
+	private static readonly Vector3I[] CardDirs = new Vector3I[] {
+		Vector3I.Forward, Vector3I.Back, Vector3I.Left, Vector3I.Right
+	};
+
+	private readonly List<Vector2I> _missingChunksCache = new List<Vector2I>();
+
+	private Label _infoLabel;
 
 	public override void _Ready()
 	{
@@ -69,12 +75,35 @@ public partial class WorldGenerator : Node3D
 			UpdateWorldChunksAroundPlayers();
 		}
 
-		// Вызов тика физики воды
 		_waterPhysicsTimer += (float)delta;
-		if (_waterPhysicsTimer >= WaterTickRate)
+		if (_waterPhysicsTimer > 1.0f) _waterPhysicsTimer = 1.0f; 
+
+		while (_waterPhysicsTimer >= WaterTickRate)
 		{
-			_waterPhysicsTimer = 0f;
+			_waterPhysicsTimer -= WaterTickRate; 
 			ProcessWaterPhysics();
+		}
+
+		if (_infoLabel != null)
+		{
+			Vector3 playerPos = Vector3.Zero;
+			var players = GetTree().GetNodesInGroup("Players");
+
+			foreach (Node player in players)
+			{
+				if (player is CharacterBody3D player3D && player3D.IsMultiplayerAuthority())
+				{
+					playerPos = player3D.GlobalPosition;
+					break;
+				}
+			}
+
+			int x = Mathf.FloorToInt(playerPos.X);
+			int y = Mathf.FloorToInt(playerPos.Y);
+			int z = Mathf.FloorToInt(playerPos.Z);
+			int fps = Mathf.RoundToInt((float)Engine.GetFramesPerSecond());
+
+			_infoLabel.Text = $"FPS: {fps}\nWorld: {WorldSettings.CurrentWorldName} | Seed: {WorldSettings.CurrentSeed} | Mode: {WorldSettings.CurrentMode}\nXYZ: {x} / {y} / {z}";
 		}
 	}
 
@@ -93,120 +122,309 @@ public partial class WorldGenerator : Node3D
 	{
 		await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
 
-		if (_noise == null)
-		{
-			_noise = new FastNoiseLite();
-			_noise.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
-			_noise.Frequency = 0.015f;
-		}
-
-		if (_riverNoise == null)
-		{
-			_riverNoise = new FastNoiseLite();
-			_riverNoise.NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin;
-			_riverNoise.Frequency = 0.007f; 
-		}
-
-		_noise.Seed = WorldSettings.CurrentSeed;
-		_riverNoise.Seed = WorldSettings.CurrentSeed + 777; 
+		InitNoises();
 
 		int d = WorldSettings.RenderDistance;
-		int chunksProcessed = 0;
+		List<Vector2I> initialPositions = new List<Vector2I>((2 * d + 1) * (2 * d + 1));
 
 		for (int x = -d; x <= d; x++)
 		{
 			for (int z = -d; z <= d; z++)
 			{
-				GenerateChunkData(x, z);
-				chunksProcessed++;
-
-				if (chunksProcessed % 8 == 0)
-				{
-					await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-				}
+				initialPositions.Add(new Vector2I(x, z));
 			}
 		}
 
+		initialPositions.Sort((a, b) => (a.X * a.X + a.Y * a.Y).CompareTo(b.X * b.X + b.Y * b.Y));
+
+		foreach (var pos in initialPositions)
+		{
+			byte[,,] blocks = await Task.Run(() => GenerateChunkBlockDataAsync(pos.X, pos.Y));
+			Chunk chunk = CreateChunkInstance(pos.X, pos.Y, blocks);
+			_chunks[pos] = chunk;
+		}
+
+		int batchCount = 0;
 		foreach (var pair in _chunks)
 		{
-			pair.Value.RegenerateMesh(null);
+			Chunk chunk = pair.Value;
+			Chunk.MeshData data = await Task.Run(() => chunk.BuildMeshData((gx, gy, gz) => GetBlockAt(gx, gy, gz)));
+			chunk.ApplyMeshData(data);
+
+			batchCount++;
+			if (batchCount % 4 == 0)
+			{
+				await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
+			}
 		}
 
 		CreateSeedLabelUI();
 		GD.Print($"[ГЕНЕРАТОР] Мир создан. Сид: {WorldSettings.CurrentSeed}");
 	}
 
+	private void InitNoises()
+	{
+		if (_noise != null) return;
+
+		_noise = new FastNoiseLite { NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin, Frequency = 0.008f, FractalOctaves = 4, Seed = WorldSettings.CurrentSeed };
+		_mountainNoise = new FastNoiseLite { NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin, Frequency = 0.004f, FractalOctaves = 4, Seed = WorldSettings.CurrentSeed + 500 };
+		_riverNoise = new FastNoiseLite { NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin, Frequency = 0.006f, Seed = WorldSettings.CurrentSeed + 777 };
+		_oceanNoise = new FastNoiseLite { NoiseType = FastNoiseLite.NoiseTypeEnum.Perlin, Frequency = 0.003f, Seed = WorldSettings.CurrentSeed + 999 };
+	}
+
+	private int GetTerrainHeightRaw(int globalX, int globalZ)
+	{
+		float baseN  = (_noise.GetNoise2D(globalX, globalZ) + 1f) * 0.5f;             
+		float mtnN   = (_mountainNoise.GetNoise2D(globalX, globalZ) + 1f) * 0.5f;     
+		float oceanN = _oceanNoise.GetNoise2D(globalX, globalZ);
+
+		float baseHeight = 26f + baseN * 6f;
+
+		float mountainHeight = 0f;
+		if (mtnN > 0.50f)
+		{
+			float mountainFactor = (mtnN - 0.50f) / 0.50f;
+			float smoothMtn = Mathf.SmoothStep(0f, 1f, mountainFactor);
+			mountainHeight = smoothMtn * 28f;
+		}
+
+		float terrain = baseHeight + mountainHeight;
+
+		float maxRiverAllowedHeight = SeaLevel + 6f; 
+		if (terrain < maxRiverAllowedHeight + 4f)
+		{
+			float rNoise = Mathf.Abs(_riverNoise.GetNoise2D(globalX, globalZ));
+			if (rNoise < 0.045f)
+			{
+				float riverFactor = 1f - (rNoise / 0.045f);
+				float smoothRiver = Mathf.SmoothStep(0f, 1f, riverFactor);
+				float mountainDampener = Mathf.Clamp((maxRiverAllowedHeight + 4f - terrain) / 4f, 0f, 1f);
+				float targetRiverLevel = SeaLevel - 3f; 
+				terrain = Mathf.Lerp(terrain, targetRiverLevel, smoothRiver * mountainDampener);
+			}
+		}
+
+		if (oceanN < -0.2f)
+		{
+			float oceanFactor = Mathf.Clamp((-0.2f - oceanN) / 0.3f, 0f, 1f);
+			float smoothOcean = Mathf.SmoothStep(0f, 1f, oceanFactor);
+			terrain = Mathf.Lerp(terrain, 12f + baseN * 4f, smoothOcean);
+		}
+
+		return Mathf.Clamp(Mathf.FloorToInt(terrain), 2, Chunk.Height - 3);
+	}
+
 	private async void UpdateWorldChunksAroundPlayers()
 	{
 		if (_isUpdatingChunks) return;
-		_isUpdatingChunks = true;
 
 		var players = GetTree().GetNodesInGroup("Players");
-		_chunksToKeep.Clear();
+		Vector3 playerPos = Vector3.Zero;
+		Vector2 playerLookDir = Vector2.Up;
+		bool foundPlayer = false;
 
 		foreach (Node player in players)
 		{
-			if (player is Node3D player3D)
+			if (player is CharacterBody3D player3D && player3D.IsMultiplayerAuthority())
 			{
-				Vector3 pos = player3D.GlobalPosition;
-				int pCx = Mathf.FloorToInt(pos.X / Chunk.Width);
-				int pCz = Mathf.FloorToInt(pos.Z / Chunk.Width);
+				playerPos = player3D.GlobalPosition;
+				Camera3D cam = GetViewport().GetCamera3D();
+				Vector3 forward = cam != null ? -cam.GlobalTransform.Basis.Z : -player3D.GlobalTransform.Basis.Z;
+				playerLookDir = new Vector2(forward.X, forward.Z).Normalized();
+				foundPlayer = true;
+				break;
+			}
+		}
 
-				int d = WorldSettings.RenderDistance;
-				for (int x = pCx - d; x <= pCx + d; x++)
+		if (!foundPlayer) return;
+
+		int pCx = Mathf.FloorToInt(playerPos.X / Chunk.Width);
+		int pCz = Mathf.FloorToInt(playerPos.Z / Chunk.Width);
+
+		if (pCx == _lastPlayerChunk.X && pCz == _lastPlayerChunk.Y) return;
+
+		_isUpdatingChunks = true;
+		_lastPlayerChunk = new Vector2I(pCx, pCz);
+
+		InitNoises();
+		int d = WorldSettings.RenderDistance;
+		_chunksToKeep.Clear();
+		_missingChunksCache.Clear();
+
+		for (int x = pCx - d; x <= pCx + d; x++)
+		{
+			for (int z = pCz - d; z <= pCz + d; z++)
+			{
+				Vector2I key = new Vector2I(x, z);
+				_chunksToKeep.Add(key);
+				if (!_chunks.ContainsKey(key))
 				{
-					for (int z = pCz - d; z <= pCz + d; z++)
+					_missingChunksCache.Add(key);
+				}
+			}
+		}
+
+		List<Vector2I> chunksToRemove = null;
+		foreach (var key in _chunks.Keys)
+		{
+			if (!_chunksToKeep.Contains(key))
+			{
+				chunksToRemove ??= new List<Vector2I>();
+				chunksToRemove.Add(key);
+			}
+		}
+
+		if (chunksToRemove != null)
+		{
+			foreach (var key in chunksToRemove)
+			{
+				if (_chunks.TryGetValue(key, out Chunk chunk))
+				{
+					chunk.QueueFree();
+					_chunks.Remove(key);
+				}
+			}
+		}
+
+		if (_missingChunksCache.Count == 0)
+		{
+			_isUpdatingChunks = false;
+			return;
+		}
+
+		_missingChunksCache.Sort((a, b) =>
+		{
+			Vector2 dirA = new Vector2(a.X - pCx, a.Y - pCz);
+			Vector2 dirB = new Vector2(b.X - pCx, b.Y - pCz);
+
+			float distSqA = dirA.LengthSquared();
+			float distSqB = dirB.LengthSquared();
+
+			float dotA = distSqA > 0.01f ? dirA.Normalized().Dot(playerLookDir) : 1f;
+			float dotB = distSqB > 0.01f ? dirB.Normalized().Dot(playerLookDir) : 1f;
+
+			float scoreA = distSqA - (dotA * 10f);
+			float scoreB = distSqB - (dotB * 10f);
+
+			return scoreA.CompareTo(scoreB);
+		});
+
+		HashSet<Vector2I> affectedChunks = new HashSet<Vector2I>();
+
+		foreach (var targetPos in _missingChunksCache)
+		{
+			if (!_chunks.ContainsKey(targetPos))
+			{
+				byte[,,] blocks = await Task.Run(() => GenerateChunkBlockDataAsync(targetPos.X, targetPos.Y));
+
+				if (!IsInsideTree()) return;
+
+				Chunk chunk = CreateChunkInstance(targetPos.X, targetPos.Y, blocks);
+				_chunks[targetPos] = chunk;
+				affectedChunks.Add(targetPos);
+
+				Vector2I[] neighborDirs = new Vector2I[] {
+					new Vector2I(targetPos.X + 1, targetPos.Y),
+					new Vector2I(targetPos.X - 1, targetPos.Y),
+					new Vector2I(targetPos.X, targetPos.Y + 1),
+					new Vector2I(targetPos.X, targetPos.Y - 1)
+				};
+
+				foreach (var nKey in neighborDirs)
+				{
+					if (_chunks.ContainsKey(nKey))
 					{
-						_chunksToKeep.Add(new Vector2I(x, z));
+						affectedChunks.Add(nKey);
 					}
 				}
 			}
 		}
 
-		List<Vector2I> chunksToRemove = new List<Vector2I>();
-		foreach (var key in _chunks.Keys)
+		int batchCount = 0;
+		foreach (var chunkPos in affectedChunks)
 		{
-			if (!_chunksToKeep.Contains(key))
-			{
-				chunksToRemove.Add(key);
-			}
-		}
+			if (!_chunks.TryGetValue(chunkPos, out Chunk chunk)) continue;
 
-		foreach (var key in chunksToRemove)
-		{
-			if (_chunks.TryGetValue(key, out Chunk chunk))
-			{
-				chunk.QueueFree();
-				_chunks.Remove(key);
-			}
-		}
+			Chunk.MeshData meshData = await Task.Run(() => chunk.BuildMeshData((gx, gy, gz) => GetBlockAt(gx, gy, gz)));
 
-		foreach (var targetPos in _chunksToKeep)
-		{
-			if (!_chunks.ContainsKey(targetPos))
-			{
-				GenerateChunkData(targetPos.X, targetPos.Y);
-				_chunks[targetPos].RegenerateMesh(null);
+			if (!IsInsideTree()) return;
 
+			chunk.ApplyMeshData(meshData);
+
+			batchCount++;
+			if (batchCount >= 3)
+			{
+				batchCount = 0;
 				await ToSignal(GetTree(), SceneTree.SignalName.ProcessFrame);
-				if (!IsInsideTree()) return; 
 			}
 		}
 
 		_isUpdatingChunks = false;
 	}
 
-	private void GenerateChunkData(int cx, int cz)
+	private Chunk CreateChunkInstance(int cx, int cz, byte[,,] blocks)
 	{
-		Chunk chunk = new Chunk();
-		chunk.ChunkX = cx;
-		chunk.ChunkZ = cz;
-		chunk.Name = $"Chunk_{cx}_{cz}";
-		
-		chunk.Position = new Vector3(cx * Chunk.Width, 0, cz * Chunk.Width);
+		Chunk chunk = new Chunk
+		{
+			ChunkX = cx,
+			ChunkZ = cz,
+			Name = $"Chunk_{cx}_{cz}",
+			Position = new Vector3(cx * Chunk.Width, 0, cz * Chunk.Width),
+			Blocks = blocks
+		};
+
 		AddChild(chunk);
-		
-		_chunks[new Vector2I(cx, cz)] = chunk;
+
+		Vector2I chunkKey = new Vector2I(cx, cz);
+		if (_modifiedBlocksByChunk.TryGetValue(chunkKey, out var modifiedInChunk))
+		{
+			foreach (var pair in modifiedInChunk)
+			{
+				int bx = pair.Key.X - cx * Chunk.Width;
+				int by = pair.Key.Y;
+				int bz = pair.Key.Z - cz * Chunk.Width;
+
+				if (bx >= 0 && bx < Chunk.Width && by >= 0 && by < Chunk.Height && bz >= 0 && bz < Chunk.Width)
+				{
+					chunk.Blocks[bx, by, bz] = pair.Value;
+				}
+			}
+		}
+
+		return chunk;
+	}
+
+	private byte[,,] GenerateChunkBlockDataAsync(int cx, int cz)
+	{
+		byte[,,] blocks = new byte[Chunk.Width, Chunk.Height, Chunk.Width];
+
+		if (WorldSettings.CurrentMode == WorldSettings.GeneratorMode.Flat)
+		{
+			int flatHeight = 5;
+			for (int x = 0; x < Chunk.Width; x++)
+			{
+				for (int z = 0; z < Chunk.Width; z++)
+				{
+					for (int y = 0; y < Chunk.Height; y++)
+					{
+						if (y == 0) blocks[x, y, z] = 1;                  
+						else if (y == flatHeight - 1) blocks[x, y, z] = 3; 
+						else if (y < flatHeight - 1) blocks[x, y, z] = 9;  
+						else blocks[x, y, z] = 0;
+					}
+				}
+			}
+			return blocks;
+		}
+
+		Span<int> hMap = stackalloc int[18 * 18];
+		for (int x = -1; x <= Chunk.Width; x++)
+		{
+			for (int z = -1; z <= Chunk.Width; z++)
+			{
+				hMap[(x + 1) * 18 + (z + 1)] = GetTerrainHeightRaw(cx * Chunk.Width + x, cz * Chunk.Width + z);
+			}
+		}
 
 		Random rand = new Random(cx * 31 + cz * 7 + WorldSettings.CurrentSeed);
 
@@ -214,61 +432,58 @@ public partial class WorldGenerator : Node3D
 		{
 			for (int z = 0; z < Chunk.Width; z++)
 			{
-				int height = 5; 
-				int globalX = cx * Chunk.Width + x;
-				int globalZ = cz * Chunk.Width + z;
+				int height = hMap[(x + 1) * 18 + (z + 1)];
 
-				// ИСКЛЮЧЕНИЕ ДЛЯ ПЛОСКОГО МИРА — Строго сухой и плоский!
-				if (WorldSettings.CurrentMode == WorldSettings.GeneratorMode.Flat)
-				{
-					height = 5;
-					for (int y = 0; y < Chunk.Height; y++)
-					{
-						if (y == 0)
-							chunk.Blocks[x, y, z] = 1; // Бедрок
-						else if (y == height - 1)
-							chunk.Blocks[x, y, z] = 3; // Трава
-						else if (y < height - 1)
-							chunk.Blocks[x, y, z] = 2; // Камень
-						else
-							chunk.Blocks[x, y, z] = 0; // Воздух
-					}
-					continue; 
-				}
+				int hNorth = hMap[(x + 1) * 18 + z];
+				int hSouth = hMap[(x + 1) * 18 + (z + 2)];
+				int hWest  = hMap[x * 18 + (z + 1)];
+				int hEast  = hMap[(x + 2) * 18 + (z + 1)];
 
-				// Нормальный мир с реками на поверхности
-				float noiseVal = _noise.GetNoise2D(globalX, globalZ);
-				float baseHeight = (noiseVal + 1f) * 0.5f * 22f + 13f; 
+				int maxDiff = Mathf.Max(
+					Mathf.Abs(height - hNorth),
+					Mathf.Max(Mathf.Abs(height - hSouth),
+					Mathf.Max(Mathf.Abs(height - hWest), Mathf.Abs(height - hEast)))
+				);
 
-				// Плавная генерация рельефа рек
-				float rNoise = _riverNoise.GetNoise2D(globalX, globalZ);
-				float absRiver = Mathf.Abs(rNoise);
-
-				if (absRiver < 0.035f) // Ширина русла
-				{
-					float intensity = 1f - (absRiver / 0.035f); // 1 в центре реки, 0 у берегов
-					// Вместо каньона, плавно прижимаем ландшафт к уровню воды
-					baseHeight = Mathf.Lerp(baseHeight, SeaLevel - 2f, intensity);
-				}
-
-				height = Mathf.FloorToInt(baseHeight);
+				bool isHighMountain = height > SeaLevel + 12;
+				bool isCliff = isHighMountain && maxDiff >= 4;
+				bool isBeachOrWater = height <= SeaLevel + 2;
 
 				for (int y = 0; y < Chunk.Height; y++)
 				{
 					if (y == 0)
-						chunk.Blocks[x, y, z] = 1;
-					else if (y < height - 1)
-						chunk.Blocks[x, y, z] = 2;
-					else if (y == height - 1)
 					{
-						chunk.Blocks[x, y, z] = (height <= SeaLevel) ? (byte)2 : (byte)3;
+						blocks[x, y, z] = 1; 
+					}
+					else if (y < height)
+					{
+						if (isCliff && y == height - 1)
+						{
+							blocks[x, y, z] = 2; 
+						}
+						else if (isBeachOrWater)
+						{
+							if (y >= height - 3)
+								blocks[x, y, z] = 7; 
+							else
+								blocks[x, y, z] = 2; 
+						}
+						else
+						{
+							if (y == height - 1)
+								blocks[x, y, z] = 3; 
+							else if (y >= height - 4)
+								blocks[x, y, z] = 9; 
+							else
+								blocks[x, y, z] = 2; 
+						}
 					}
 					else
 					{
 						if (y <= SeaLevel)
-							chunk.Blocks[x, y, z] = 8; // Заливаем русло
+							blocks[x, y, z] = 8; 
 						else
-							chunk.Blocks[x, y, z] = 0;
+							blocks[x, y, z] = 0; 
 					}
 				}
 			} 
@@ -280,107 +495,23 @@ public partial class WorldGenerator : Node3D
 			{
 				for (int z = 2; z < Chunk.Width - 2; z++)
 				{
-					if (rand.NextDouble() < 0.02) 
+					if (rand.NextDouble() < 0.012) 
 					{
-						int globalX = cx * Chunk.Width + x;
-						int globalZ = cz * Chunk.Width + z;
-						
-						float noiseVal = _noise.GetNoise2D(globalX, globalZ);
-						float baseHeight = (noiseVal + 1f) * 0.5f * 22f + 13f;
-						float rNoise = _riverNoise.GetNoise2D(globalX, globalZ);
+						int height = hMap[(x + 1) * 18 + (z + 1)];
 
-						if (Mathf.Abs(rNoise) < 0.035f)
+						if (height > SeaLevel + 1 && blocks[x, height - 1, z] == 3)
 						{
-							baseHeight = Mathf.Lerp(baseHeight, SeaLevel - 2f, 1f - (Mathf.Abs(rNoise) / 0.035f));
-						}
-						
-						int height = Mathf.FloorToInt(baseHeight);
-
-						if (height > SeaLevel && Mathf.Abs(rNoise) >= 0.035f)
-						{
-							GrowTree(chunk, x, height, z, rand);
+							GrowTreeInBlocks(blocks, x, height, z, rand);
 						}
 					}
 				}
 			}
 		}
 
-		Vector2I chunkKey = new Vector2I(cx, cz);
-		if (_modifiedBlocksByChunk.TryGetValue(chunkKey, out var modifiedInChunk))
-		{
-			foreach (var pair in modifiedInChunk)
-			{
-				Vector3I globalPos = pair.Key;
-				int bx = globalPos.X - cx * Chunk.Width;
-				int by = globalPos.Y;
-				int bz = globalPos.Z - cz * Chunk.Width;
-
-				if (bx >= 0 && bx < Chunk.Width && by >= 0 && by < Chunk.Height && bz >= 0 && bz < Chunk.Width)
-				{
-					chunk.Blocks[bx, by, bz] = pair.Value;
-				}
-			}
-		}
+		return blocks;
 	}
 
-	// Алгоритм физики симуляции жидкостей (Исправлено: разлив идет волнами через задержку)
-	private void ProcessWaterPhysics()
-	{
-		int currentQueueCount = _waterQueue.Count;
-		if (currentQueueCount == 0) return;
-
-		int maxUpdatesPerTick = 400; // Лимит блоков за один тик, чтобы не проседал FPS
-
-		// Берем строго то количество элементов, которое БЫЛО в очереди НА НАЧАЛО этого тика.
-		// Новые сгенерированные блоки воды внутри этого цикла будут обработаны только в следующем тике!
-		int toProcess = Mathf.Min(currentQueueCount, maxUpdatesPerTick);
-
-		for (int i = 0; i < toProcess; i++)
-		{
-			if (_waterQueue.Count == 0) break;
-
-			WaterTick current = _waterQueue.Dequeue();
-
-			if (GetBlockAt(current.Position.X, current.Position.Y, current.Position.Z) != 8)
-				continue; 
-
-			// 1. Проверяем блок под водой
-			Vector3I downPos = current.Position + Vector3I.Down;
-			if (downPos.Y > 0)
-			{
-				byte downBlock = GetBlockAt(downPos.X, downPos.Y, downPos.Z);
-				if (downBlock == 0) // Под нами воздух -> падаем вниз!
-				{
-					SetBlockAt(downPos.X, downPos.Y, downPos.Z, 8, true);
-					// При падении вниз сбрасываем счетчик растекания вбок обратно на 4
-					_waterQueue.Enqueue(new WaterTick { Position = downPos, SpreadLeft = 4 });
-					continue; 
-				}
-			}
-
-			// 2. Если внизу препятствие -> пытаемся течь вбок во все 4 стороны
-			if (current.SpreadLeft > 0)
-			{
-				Vector3I[] horizontalSides = {
-					current.Position + Vector3I.Forward,
-					current.Position + Vector3I.Back,
-					current.Position + Vector3I.Left,
-					current.Position + Vector3I.Right
-				};
-
-				foreach (var side in horizontalSides)
-				{
-					if (GetBlockAt(side.X, side.Y, side.Z) == 0) // Если сбоку воздух
-					{
-						SetBlockAt(side.X, side.Y, side.Z, 8, true);
-						_waterQueue.Enqueue(new WaterTick { Position = side, SpreadLeft = current.SpreadLeft - 1 });
-					}
-				}
-			}
-		}
-	}
-
-	private void GrowTree(Chunk chunk, int tx, int startY, int tz, Random rand)
+	private void GrowTreeInBlocks(byte[,,] blocks, int tx, int startY, int tz, Random rand)
 	{
 		int treeHeight = rand.Next(4, 6);
 
@@ -389,7 +520,7 @@ public partial class WorldGenerator : Node3D
 
 		for (int i = 0; i < treeHeight; i++)
 		{
-			chunk.Blocks[tx, startY + i, tz] = 4;
+			blocks[tx, startY + i, tz] = 4;
 		}
 
 		int leafStart = startY + treeHeight - 2;
@@ -401,11 +532,166 @@ public partial class WorldGenerator : Node3D
 			{
 				for (int lz = tz - radius; lz <= tz + radius; lz++)
 				{
-					if (chunk.Blocks[lx, ly, lz] == 0)
+					if (blocks[lx, ly, lz] == 0)
 					{
-						chunk.Blocks[lx, ly, lz] = 5;
+						blocks[lx, ly, lz] = 5;
 					}
 				}
+			}
+		}
+	}
+
+	private static int GetWaterLevel(byte blockType)
+	{
+		if (blockType == 8) return 8; 
+		if (blockType >= 11 && blockType <= 17) return 18 - blockType; 
+		return 0;
+	}
+
+	private static byte GetBlockTypeForWaterLevel(int level)
+	{
+		if (level >= 8) return 8;
+		if (level <= 0) return 0;
+		return (byte)(18 - level);
+	}
+
+	private static bool CanWaterFlowInto(byte blockType)
+	{
+		return blockType == 0 || (blockType >= 11 && blockType <= 17);
+	}
+
+	private void EnqueueWaterPos(Vector3I pos)
+	{
+		if (pos.Y >= 0 && pos.Y < Chunk.Height && _queuedWaterPositions.Add(pos))
+		{
+			_nextWaterQueue.Enqueue(pos); 
+		}
+	}
+
+	private void ProcessWaterPhysics()
+	{
+		if (_currentWaterQueue.Count == 0)
+		{
+			if (_nextWaterQueue.Count == 0) return;
+
+			var temp = _currentWaterQueue;
+			_currentWaterQueue = _nextWaterQueue;
+			_nextWaterQueue = temp;
+
+			_queuedWaterPositions.Clear();
+		}
+
+		_dirtyChunksThisTick.Clear();
+
+		while (_currentWaterQueue.Count > 0)
+		{
+			Vector3I pos = _currentWaterQueue.Dequeue();
+
+			byte currentType = GetBlockAt(pos.X, pos.Y, pos.Z);
+			if (!Chunk.IsWater(currentType)) continue;
+
+			int currentLevel = GetWaterLevel(currentType);
+			int idealLevel = 0;
+
+			if (currentType == 8)
+			{
+				idealLevel = 8;
+			}
+			else
+			{
+				byte topType = GetBlockAt(pos.X, pos.Y + 1, pos.Z);
+				if (Chunk.IsWater(topType))
+				{
+					idealLevel = 7;
+				}
+				else
+				{
+					int maxNeighborLevel = 0;
+					foreach (var dir in CardDirs)
+					{
+						Vector3I nPos = pos + dir;
+						byte nType = GetBlockAt(nPos.X, nPos.Y, nPos.Z);
+						if (Chunk.IsWater(nType))
+						{
+							int nLevel = GetWaterLevel(nType);
+							if (nLevel > maxNeighborLevel)
+							{
+								maxNeighborLevel = nLevel;
+							}
+						}
+					}
+					idealLevel = maxNeighborLevel - 1;
+				}
+			}
+
+			if (idealLevel < 0) idealLevel = 0;
+
+			if (idealLevel != currentLevel)
+			{
+				byte newType = GetBlockTypeForWaterLevel(idealLevel);
+				if (currentType != newType)
+				{
+					SetBlockAtInternal(pos.X, pos.Y, pos.Z, newType, _dirtyChunksThisTick);
+
+					EnqueueWaterPos(pos + Vector3I.Down);
+					EnqueueWaterPos(pos + Vector3I.Up);
+					foreach (var dir in CardDirs) EnqueueWaterPos(pos + dir);
+				}
+				continue;
+			}
+
+			if (currentLevel <= 0) continue;
+
+			Vector3I downPos = pos + Vector3I.Down;
+			bool canFlowDown = false;
+
+			if (downPos.Y >= 0)
+			{
+				byte downType = GetBlockAt(downPos.X, downPos.Y, downPos.Z);
+				if (downType == 8)
+				{
+					canFlowDown = true;
+				}
+				else if (CanWaterFlowInto(downType))
+				{
+					canFlowDown = true;
+					int downLevel = GetWaterLevel(downType);
+					if (downLevel < 7 || downType != 11)
+					{
+						SetBlockAtInternal(downPos.X, downPos.Y, downPos.Z, 11, _dirtyChunksThisTick); 
+						EnqueueWaterPos(downPos);
+					}
+				}
+			}
+
+			if (!canFlowDown && currentLevel > 1)
+			{
+				int spreadLevel = currentLevel - 1;
+				byte spreadType = GetBlockTypeForWaterLevel(spreadLevel);
+
+				foreach (var dir in CardDirs)
+				{
+					Vector3I sidePos = pos + dir;
+					byte sideType = GetBlockAt(sidePos.X, sidePos.Y, sidePos.Z);
+
+					if (CanWaterFlowInto(sideType))
+					{
+						int sideLevel = GetWaterLevel(sideType);
+						if (sideLevel < spreadLevel)
+						{
+							SetBlockAtInternal(sidePos.X, sidePos.Y, sidePos.Z, spreadType, _dirtyChunksThisTick);
+							EnqueueWaterPos(sidePos);
+						}
+					}
+				}
+			}
+		}
+
+		foreach (var chunkKey in _dirtyChunksThisTick)
+		{
+			if (_chunks.TryGetValue(chunkKey, out Chunk chunk))
+			{
+				chunk.RegenerateMesh(null);
 			}
 		}
 	}
@@ -413,91 +699,93 @@ public partial class WorldGenerator : Node3D
 	private void CreateSeedLabelUI()
 	{
 		CanvasLayer canvas = new CanvasLayer();
-		Label label = new Label();
-		label.Text = $"World: {WorldSettings.CurrentWorldName} | Seed: {WorldSettings.CurrentSeed} | Mode: {WorldSettings.CurrentMode}";
-		label.Position = new Vector2(20, 20); 
+		_infoLabel = new Label
+		{
+			Position = new Vector2(20, 20)
+		};
 		
-		canvas.AddChild(label);
+		canvas.AddChild(_infoLabel);
 		AddChild(canvas);
 	}
 
-	// ПЕРЕГРУЗКА: Этот метод вызывается Игроком и внешними скриптами
-	public void SetBlockAt(int globalX, int globalY, int globalZ, byte type)
+	private void SetBlockAtInternal(int globalX, int globalY, int globalZ, byte type, HashSet<Vector2I> dirtyChunks)
 	{
-		SetBlockAt(globalX, globalY, globalZ, type, false);
-	}
+		if (globalY < 0 || globalY >= Chunk.Height) return;
 
-	// ОСНОВНОЙ МЕТОД: Используется внутри симуляции физики и перегрузки
-	public void SetBlockAt(int globalX, int globalY, int globalZ, byte type, bool fromPhysics)
-	{
 		int cx = Mathf.FloorToInt((float)globalX / Chunk.Width);
 		int cz = Mathf.FloorToInt((float)globalZ / Chunk.Width);
 
 		Vector2I key = new Vector2I(cx, cz);
 		Vector3I globalPos = new Vector3I(globalX, globalY, globalZ);
-		_modifiedBlocksDict[globalPos] = type;
 
-		if (!_modifiedBlocksByChunk.ContainsKey(key))
-			_modifiedBlocksByChunk[key] = new Dictionary<Vector3I, byte>();
-		_modifiedBlocksByChunk[key][globalPos] = type;
+		if (type == 0)
+			_modifiedBlocksDict.Remove(globalPos);
+		else
+			_modifiedBlocksDict[globalPos] = type;
 
-		if (_chunks.ContainsKey(key))
+		if (!_modifiedBlocksByChunk.TryGetValue(key, out var dictInChunk))
 		{
-			Chunk chunk = _chunks[key];
+			dictInChunk = new Dictionary<Vector3I, byte>();
+			_modifiedBlocksByChunk[key] = dictInChunk;
+		}
+		
+		if (type == 0)
+			dictInChunk.Remove(globalPos);
+		else
+			dictInChunk[globalPos] = type;
+
+		if (_chunks.TryGetValue(key, out Chunk chunk))
+		{
 			int bx = globalX - cx * Chunk.Width;
 			int by = globalY;
 			int bz = globalZ - cz * Chunk.Width;
 
 			if (bx >= 0 && bx < Chunk.Width && by >= 0 && by < Chunk.Height && bz >= 0 && bz < Chunk.Width)
 			{
-				if (type == 0 && chunk.Blocks[bx, by, bz] == 1) return;
 				chunk.Blocks[bx, by, bz] = type;
-				chunk.RegenerateMesh(null);
+				dirtyChunks.Add(key);
 
-				// Если поставлена вода И это ручная установка ведра (НЕ симуляция физики)
-				if (type == 8 && !fromPhysics)
-				{
-					_waterQueue.Enqueue(new WaterTick { Position = globalPos, SpreadLeft = 4 });
-				}
-
-				// Если блок уничтожен (стал воздухом), будим соседнюю воду, чтобы она текла сюда
-				if (type == 0)
-				{
-					Vector3I[] neighbors = {
-						globalPos + Vector3I.Up,
-						globalPos + Vector3I.Forward,
-						globalPos + Vector3I.Back,
-						globalPos + Vector3I.Left,
-						globalPos + Vector3I.Right
-					};
-
-					foreach (var n in neighbors)
-					{
-						if (GetBlockAt(n.X, n.Y, n.Z) == 8)
-						{
-							_waterQueue.Enqueue(new WaterTick { Position = n, SpreadLeft = 4 });
-						}
-					}
-				}
-
-				// УБИРАЕМ КУБИЧЕСКИЕ БАРЬЕРЫ
-				if (bx == 0) NotifyChunkToUpdate(cx - 1, cz);
-				if (bx == Chunk.Width - 1) NotifyChunkToUpdate(cx + 1, cz);
-				if (bz == 0) NotifyChunkToUpdate(cx, cz - 1);
-				if (bz == Chunk.Width - 1) NotifyChunkToUpdate(cx, cz + 1);
+				if (bx == 0) dirtyChunks.Add(new Vector2I(cx - 1, cz));
+				if (bx == Chunk.Width - 1) dirtyChunks.Add(new Vector2I(cx + 1, cz));
+				if (bz == 0) dirtyChunks.Add(new Vector2I(cx, cz - 1));
+				if (bz == Chunk.Width - 1) dirtyChunks.Add(new Vector2I(cx, cz + 1));
 			}
 		}
 	}
 
-	private void NotifyChunkToUpdate(int cx, int cz)
+	public void SetBlockAt(int globalX, int globalY, int globalZ, byte type)
 	{
-		Vector2I neighborKey = new Vector2I(cx, cz);
-		if (_chunks.TryGetValue(neighborKey, out Chunk neighborChunk))
+		SetBlockAt(globalX, globalY, globalZ, type, false);
+	}
+
+	public void SetBlockAt(int globalX, int globalY, int globalZ, byte type, bool fromPhysics)
+	{
+		HashSet<Vector2I> dirtyChunks = new HashSet<Vector2I>();
+		SetBlockAtInternal(globalX, globalY, globalZ, type, dirtyChunks);
+
+		Vector3I globalPos = new Vector3I(globalX, globalY, globalZ);
+
+		if (Chunk.IsWater(type))
 		{
-			neighborChunk.RegenerateMesh(null);
+			EnqueueWaterPos(globalPos);
+		}
+
+		EnqueueWaterPos(globalPos + Vector3I.Up);
+		EnqueueWaterPos(globalPos + Vector3I.Down);
+		EnqueueWaterPos(globalPos + Vector3I.Forward);
+		EnqueueWaterPos(globalPos + Vector3I.Back);
+		EnqueueWaterPos(globalPos + Vector3I.Left);
+		EnqueueWaterPos(globalPos + Vector3I.Right);
+
+		foreach (var chunkKey in dirtyChunks)
+		{
+			if (_chunks.TryGetValue(chunkKey, out Chunk chunk))
+			{
+				chunk.RegenerateMesh(null);
+			}
 		}
 	}
-	
+
 	public byte GetBlockAt(int globalX, int globalY, int globalZ)
 	{
 		if (globalY < 0 || globalY >= Chunk.Height) return 0;
@@ -524,12 +812,12 @@ public partial class WorldGenerator : Node3D
 	{
 		try
 		{
-			if (!System.IO.Directory.Exists(WorldSettings.SaveFolderPath))
+			if (!Directory.Exists(WorldSettings.SaveFolderPath))
 			{
-				System.IO.Directory.CreateDirectory(WorldSettings.SaveFolderPath);
+				Directory.CreateDirectory(WorldSettings.SaveFolderPath);
 			}
 
-			string filePath = System.IO.Path.Combine(WorldSettings.SaveFolderPath, $"{WorldSettings.CurrentWorldName}.json");
+			string filePath = Path.Combine(WorldSettings.SaveFolderPath, $"{WorldSettings.CurrentWorldName}.json");
 
 			float pX = 0f, pY = 70f, pZ = 0f;
 			var players = GetTree().GetNodesInGroup("Players");
@@ -552,7 +840,7 @@ public partial class WorldGenerator : Node3D
 				PlayerX = pX,
 				PlayerY = pY,
 				PlayerZ = pZ,
-				ModifiedBlocks = new List<BlockSaveData>()
+				ModifiedBlocks = new List<BlockSaveData>(_modifiedBlocksDict.Count)
 			};
 
 			foreach (var pair in _modifiedBlocksDict)
@@ -577,7 +865,7 @@ public partial class WorldGenerator : Node3D
 
 	public void LoadWorldData()
 	{
-		string filePath = System.IO.Path.Combine(WorldSettings.SaveFolderPath, $"{WorldSettings.CurrentWorldName}.json");
+		string filePath = Path.Combine(WorldSettings.SaveFolderPath, $"{WorldSettings.CurrentWorldName}.json");
 
 		if (!File.Exists(filePath))
 		{
@@ -607,10 +895,13 @@ public partial class WorldGenerator : Node3D
 					int bcz = Mathf.FloorToInt((float)pos.Z / Chunk.Width);
 					Vector2I chunkKey = new Vector2I(bcx, bcz);
 
-					if (!_modifiedBlocksByChunk.ContainsKey(chunkKey))
-						_modifiedBlocksByChunk[chunkKey] = new Dictionary<Vector3I, byte>();
+					if (!_modifiedBlocksByChunk.TryGetValue(chunkKey, out var dictInChunk))
+					{
+						dictInChunk = new Dictionary<Vector3I, byte>();
+						_modifiedBlocksByChunk[chunkKey] = dictInChunk;
+					}
 					
-					_modifiedBlocksByChunk[chunkKey][pos] = blockData.Type;
+					dictInChunk[pos] = blockData.Type;
 				}
 			}
 		}

@@ -78,7 +78,7 @@ public partial class PauseMenu : CanvasLayer
 	{
 		if (_distanceLabel != null)
 		{
-			_distanceLabel.Text = $"Дальность прогрузки: {value} чанков";
+			_distanceLabel.Text = $"Render Distance: {value} ";
 		}
 	}
 

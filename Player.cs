@@ -1,5 +1,6 @@
 using Godot;
 using System;
+using System.Collections.Generic;
 
 public partial class Player : CharacterBody3D
 {
@@ -13,8 +14,7 @@ public partial class Player : CharacterBody3D
 	private float _rotationX = 0f;
 	private bool _isFlying = false; 
 
-	// Массив хотбара — теперь тут честно лежит 7 элементов (ID 8 — Вода)
-	private byte[] _hotbar = new byte[] { 2, 3, 4, 5, 6, 7, 8 };
+	private readonly byte[] _hotbar = new byte[] { 2, 3, 9, 7, 4, 5, 6, 10, 8 };
 	private int _currentSlot = 0; 
 
 	private CanvasLayer _uiLayer;
@@ -26,16 +26,22 @@ public partial class Player : CharacterBody3D
 	private const float LabelDisplayTime = 1.0f;
 	private const float LabelFadeTime = 0.5f;    
 
-	private string[] _blockFullNames = { "Stone", "Grass", "Oak Log", "Leaves", "Oak Planks", "Obsidian", "Water" };
-	private string[] _texturePaths = {
+	private static readonly string[] BlockFullNames = { 
+		"Stone", "Grass", "Dirt", "Sand", "Oak Log", "Leaves", "Oak Planks", "Obsidian", "Water Source" 
+	};
+	private static readonly string[] TexturePaths = {
 		"res://textures/stone.png",
 		"res://textures/grassblock_top.png",
+		"res://textures/dirt.png",
+		"res://textures/sand.png",
 		"res://textures/oaklog_side.png",
 		"res://textures/leaves.png",
 		"res://textures/oakplanks.png",
 		"res://textures/obsidian.png",
 		"res://textures/water.png" 
 	};
+
+	private static readonly Dictionary<byte, StandardMaterial3D> ParticleMaterials = new Dictionary<byte, StandardMaterial3D>();
 
 	public override void _EnterTree()
 	{
@@ -49,11 +55,16 @@ public partial class Player : CharacterBody3D
 
 	public override void _Ready()
 	{
-		Multiplayer.PeerDisconnected += OnPeerDisconnected;
+		if (Multiplayer != null)
+		{
+			Multiplayer.PeerDisconnected += OnPeerDisconnected;
+		}
 		
 		AddToGroup("Players");
 
-		if (IsMultiplayerAuthority())
+		bool isAuthority = Multiplayer.HasMultiplayerPeer() && IsMultiplayerAuthority();
+
+		if (isAuthority)
 		{
 			if (WorldSettings.IsLoadingExistingWorld)
 				GlobalPosition = WorldSettings.SavedPlayerPosition;
@@ -67,7 +78,7 @@ public partial class Player : CharacterBody3D
 		if (GetTree().CurrentScene.HasNode("BlockHighlight"))
 			_highlight = GetTree().CurrentScene.GetNode<Node3D>("BlockHighlight");
 
-		if (IsMultiplayerAuthority())
+		if (isAuthority)
 		{
 			Input.MouseMode = Input.MouseModeEnum.Captured;
 			if (_camera != null) _camera.Current = true;
@@ -88,7 +99,7 @@ public partial class Player : CharacterBody3D
 
 	private void OnPeerDisconnected(long id)
 	{
-		if (GetMultiplayerAuthority() == id)
+		if (Multiplayer.HasMultiplayerPeer() && GetMultiplayerAuthority() == id)
 		{
 			QueueFree();
 		}
@@ -125,22 +136,26 @@ public partial class Player : CharacterBody3D
 
 		for (int i = 0; i < _hotbar.Length; i++)
 		{
-			var slotBackground = new ColorRect();
-			slotBackground.CustomMinimumSize = new Vector2(50, 50);
-			slotBackground.Color = new Color(0f, 0f, 0f, 0.4f); 
+			var slotBackground = new ColorRect
+			{
+				CustomMinimumSize = new Vector2(50, 50),
+				Color = new Color(0f, 0f, 0f, 0.4f)
+			};
 			_hotbarContainer.AddChild(slotBackground);
 
-			_slots[i] = new TextureRect();
-			_slots[i].CustomMinimumSize = new Vector2(40, 40);
+			_slots[i] = new TextureRect
+			{
+				CustomMinimumSize = new Vector2(40, 40),
+				ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+				TextureFilter = CanvasItem.TextureFilterEnum.Nearest
+			};
 			_slots[i].SetAnchorsPreset(Control.LayoutPreset.Center);
 			_slots[i].GrowHorizontal = Control.GrowDirection.Both;
 			_slots[i].GrowVertical = Control.GrowDirection.Both;
-			_slots[i].ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize;
-			_slots[i].TextureFilter = CanvasItem.TextureFilterEnum.Nearest;
 
-			if (ResourceLoader.Exists(_texturePaths[i]))
+			if (ResourceLoader.Exists(TexturePaths[i]))
 			{
-				_slots[i].Texture = GD.Load<Texture2D>(_texturePaths[i]);
+				_slots[i].Texture = GD.Load<Texture2D>(TexturePaths[i]);
 			}
 
 			slotBackground.AddChild(_slots[i]);
@@ -160,9 +175,9 @@ public partial class Player : CharacterBody3D
 			}
 		}
 
-		if (_blockNameLabel != null && _currentSlot < _blockFullNames.Length)
+		if (_blockNameLabel != null && _currentSlot < BlockFullNames.Length)
 		{
-			_blockNameLabel.Text = _blockFullNames[_currentSlot];
+			_blockNameLabel.Text = BlockFullNames[_currentSlot];
 			_blockNameLabel.Modulate = new Color(1, 1, 1, 1); 
 			_labelFadeTimer = LabelDisplayTime + LabelFadeTime;
 		}
@@ -183,22 +198,21 @@ public partial class Player : CharacterBody3D
 
 	private bool IsInWater()
 	{
-		var world = GetTree().CurrentScene;
-		if (world != null && world.HasMethod("GetBlockAt"))
+		if (GetTree().CurrentScene is WorldGenerator world)
 		{
 			int px = Mathf.FloorToInt(GlobalPosition.X);
 			int pyFeet = Mathf.FloorToInt(GlobalPosition.Y + 0.2f);
 			int pz = Mathf.FloorToInt(GlobalPosition.Z);
 
-			byte blockFeet = (byte)world.Call("GetBlockAt", px, pyFeet, pz);
-			return blockFeet == 8; 
+			byte blockFeet = world.GetBlockAt(px, pyFeet, pz);
+			return Chunk.IsWater(blockFeet); 
 		}
 		return false;
 	}
 
 	public override void _Input(InputEvent @event)
 	{
-		if (!IsMultiplayerAuthority()) return;
+		if (!Multiplayer.HasMultiplayerPeer() || !IsMultiplayerAuthority()) return;
 
 		if (@event is InputEventKey keyEvent && keyEvent.Pressed && !keyEvent.Echo)
 		{
@@ -206,7 +220,6 @@ public partial class Player : CharacterBody3D
 			{
 				_isFlying = !_isFlying;
 				Velocity = Vector3.Zero; 
-				GD.Print(_isFlying ? "[РЕЖИМ ПОЛЕТА] Включен" : "[РЕЖИМ ПОЛЕТА] Выключен");
 			}
 		}
 
@@ -230,22 +243,21 @@ public partial class Player : CharacterBody3D
 		}
 
 		if (Input.IsKeyPressed(Key.Key1) && _currentSlot != 0) { _currentSlot = 0; UpdateUI(); }
-		if (Input.IsKeyPressed(Key.Key2) && _currentSlot != 1) { _currentSlot = 1; UpdateUI(); }
-		if (Input.IsKeyPressed(Key.Key3) && _currentSlot != 2) { _currentSlot = 2; UpdateUI(); }
-		if (Input.IsKeyPressed(Key.Key4) && _currentSlot != 3) { _currentSlot = 3; UpdateUI(); }
-		if (Input.IsKeyPressed(Key.Key5) && _currentSlot != 4) { _currentSlot = 4; UpdateUI(); }
-		if (Input.IsKeyPressed(Key.Key6) && _currentSlot != 5) { _currentSlot = 5; UpdateUI(); }
-		if (Input.IsKeyPressed(Key.Key7) && _currentSlot != 6) { _currentSlot = 6; UpdateUI(); } 
+		else if (Input.IsKeyPressed(Key.Key2) && _currentSlot != 1) { _currentSlot = 1; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key3) && _currentSlot != 2) { _currentSlot = 2; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key4) && _currentSlot != 3) { _currentSlot = 3; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key5) && _currentSlot != 4) { _currentSlot = 4; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key6) && _currentSlot != 5) { _currentSlot = 5; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key7) && _currentSlot != 6) { _currentSlot = 6; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key8) && _currentSlot != 7) { _currentSlot = 7; UpdateUI(); }
+		else if (Input.IsKeyPressed(Key.Key9) && _currentSlot != 8) { _currentSlot = 8; UpdateUI(); }
 	}
 
 	public override void _PhysicsProcess(double delta)
 	{
-		if (IsMultiplayerAuthority())
-		{
-			UpdateTextVisibility((float)delta);
-		}
+		if (!Multiplayer.HasMultiplayerPeer() || !IsMultiplayerAuthority()) return;
 
-		if (!IsMultiplayerAuthority()) return;
+		UpdateTextVisibility((float)delta);
 
 		Vector3 velocity = Velocity;
 		bool waterState = IsInWater();
@@ -335,6 +347,8 @@ public partial class Player : CharacterBody3D
 
 		var spaceState = GetWorld3D().DirectSpaceState;
 		var query = PhysicsRayQueryParameters3D.Create(from, to);
+		query.Exclude = new Godot.Collections.Array<Rid> { GetRid() }; 
+
 		var result = spaceState.IntersectRay(query);
 
 		if (result.Count > 0)
@@ -365,6 +379,8 @@ public partial class Player : CharacterBody3D
 
 		var spaceState = GetWorld3D().DirectSpaceState;
 		var query = PhysicsRayQueryParameters3D.Create(from, to);
+		query.Exclude = new Godot.Collections.Array<Rid> { GetRid() };
+
 		var result = spaceState.IntersectRay(query);
 
 		if (result.Count > 0)
@@ -384,16 +400,47 @@ public partial class Player : CharacterBody3D
 				int py = Mathf.FloorToInt(placePos.Y);
 				int pz = Mathf.FloorToInt(placePos.Z);
 
-				Aabb blockAabb = new Aabb(new Vector3(px, py, pz), Vector3.One);
-				Vector3 playerMin = new Vector3(GlobalPosition.X - 0.3f, GlobalPosition.Y + 0.01f, GlobalPosition.Z - 0.3f);
-				Vector3 playerSize = new Vector3(0.6f, 1.75f, 0.6f);
-				Aabb playerAabb = new Aabb(playerMin, playerSize);
+				var boxShape = new BoxShape3D { Size = new Vector3(0.98f, 0.98f, 0.98f) }; 
 
-				if (playerAabb.Intersects(blockAabb)) return;
+				var shapeQuery = new PhysicsShapeQueryParameters3D
+				{
+					Shape = boxShape,
+					Transform = new Transform3D(Basis.Identity, new Vector3(px + 0.5f, py + 0.5f, pz + 0.5f)),
+				};
+
+				var intersections = spaceState.IntersectShape(shapeQuery);
+
+				if (intersections.Count > 0)
+				{
+					return;
+				}
+
+				if (Mathf.FloorToInt(GlobalPosition.X) == px && Mathf.FloorToInt(GlobalPosition.Z) == pz && py == Mathf.FloorToInt(GlobalPosition.Y - 1f))
+				{
+					float topY = py + 1.0f;
+					if (GlobalPosition.Y >= topY - 0.05f && GlobalPosition.Y <= topY + 0.3f)
+					{
+						GlobalPosition = new Vector3(GlobalPosition.X, topY, GlobalPosition.Z);
+						if (Velocity.Y < 0f)
+						{
+							Velocity = new Vector3(Velocity.X, 0f, Velocity.Z);
+						}
+					}
+				}
 
 				byte blockToPlace = _hotbar[_currentSlot];
+
+				// Ротация бревна в зависимости от грани
+				if (blockToPlace == 4)
+				{
+					if (Mathf.Abs(hitNormal.X) > 0.5f)
+						blockToPlace = 18; // Горизонтально по X
+					else if (Mathf.Abs(hitNormal.Z) > 0.5f)
+						blockToPlace = 19; // Горизонтально по Z
+					else
+						blockToPlace = 4;  // Вертикально по Y
+				}
 				
-				// Обращаемся напрямую к центральному NetworkManager
 				if (NetworkManager.Instance != null)
 				{
 					NetworkManager.Instance.ChallengeBlockChange(new Vector3I(px, py, pz), blockToPlace);
@@ -401,12 +448,105 @@ public partial class Player : CharacterBody3D
 			}
 			else
 			{
-				// Обращаемся напрямую к центральному NetworkManager для удаления (тип 0)
+				if (GetTree().CurrentScene is WorldGenerator world)
+				{
+					byte oldBlock = world.GetBlockAt(bx, by, bz);
+					
+					// Запрещаем ломать бедрок
+					if (oldBlock == 1) return;
+
+					if (oldBlock > 0 && !Chunk.IsWater(oldBlock))
+					{
+						SpawnBlockParticles(new Vector3(bx, by, bz), oldBlock);
+					}
+				}
+
 				if (NetworkManager.Instance != null)
 				{
 					NetworkManager.Instance.ChallengeBlockChange(new Vector3I(bx, by, bz), 0);
 				}
 			}
 		}
+	}
+
+	private StandardMaterial3D GetParticleMaterial(byte blockType)
+	{
+		if (ParticleMaterials.TryGetValue(blockType, out var cachedMat))
+			return cachedMat;
+
+		string texPath = GetTexturePathForBlock(blockType);
+		if (ResourceLoader.Exists(texPath))
+		{
+			var mat = new StandardMaterial3D
+			{
+				AlbedoTexture = GD.Load<Texture2D>(texPath),
+				TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
+				BillboardMode = BaseMaterial3D.BillboardModeEnum.Particles,
+				CullMode = BaseMaterial3D.CullModeEnum.Disabled,
+				AlbedoColor = new Color(1f, 1f, 1f, 1f)
+			};
+
+			ParticleMaterials[blockType] = mat;
+			return mat;
+		}
+		return null;
+	}
+
+	private void SpawnBlockParticles(Vector3 pos, byte blockType)
+	{
+		var particles = new CpuParticles3D();
+
+		GetTree().CurrentScene.AddChild(particles);
+		particles.GlobalPosition = pos + new Vector3(0.5f, 0.5f, 0.5f);
+
+		particles.Amount = 20;
+		particles.Lifetime = 0.4f;
+		particles.OneShot = true;
+		particles.Explosiveness = 1.0f;
+		
+		particles.EmissionShape = CpuParticles3D.EmissionShapeEnum.Box;
+		particles.EmissionBoxExtents = new Vector3(0.35f, 0.35f, 0.35f);
+		
+		particles.Direction = new Vector3(0, 1, 0);
+		particles.Spread = 180f;
+		particles.InitialVelocityMin = 2.5f;
+		particles.InitialVelocityMax = 4.5f;
+		particles.Gravity = new Vector3(0, -12f, 0);
+		particles.ScaleAmountMin = 0.06f;
+		particles.ScaleAmountMax = 0.12f;
+
+		StandardMaterial3D mat = GetParticleMaterial(blockType);
+		if (mat != null)
+		{
+			var quadMesh = new QuadMesh
+			{
+				Size = new Vector2(0.12f, 0.12f),
+				Material = mat
+			};
+			particles.Mesh = quadMesh;
+		}
+
+		particles.Emitting = true;
+
+		var timer = GetTree().CreateTimer(0.5f);
+		timer.Timeout += () => particles.QueueFree();
+	}
+
+	private static string GetTexturePathForBlock(byte type)
+	{
+		return type switch
+		{
+			1 => "res://textures/bedrock.png",
+			2 => "res://textures/stone.png",
+			3 => "res://textures/grassblock_top.png",
+			4 or 18 or 19 => "res://textures/oaklog_side.png",
+			5 => "res://textures/leaves.png",
+			6 => "res://textures/oakplanks.png",
+			7 => "res://textures/sand.png",
+			8 => "res://textures/water.png",
+			9 => "res://textures/dirt.png",
+			10 => "res://textures/obsidian.png",
+			_ => "res://textures/stone.png"
+		};
 	}
 }

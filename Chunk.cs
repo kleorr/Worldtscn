@@ -15,6 +15,7 @@ public partial class Chunk : StaticBody3D
 	private MeshInstance3D _opaqueMeshInstance; 
 	private MeshInstance3D _waterMeshInstance;  
 	private CollisionShape3D _collisionShape;
+	private WorldGenerator _worldGenerator;
 
 	private static StandardMaterial3D _opaqueMaterial;
 	private static StandardMaterial3D _waterMaterial;
@@ -29,6 +30,29 @@ public partial class Chunk : StaticBody3D
 		new Vector3I(0, -1, 0)   // 5: Вниз
 	};
 
+	private static readonly int[][] FaceIndices = new int[][]
+	{
+		new int[] { 5, 4, 7, 6 }, 
+		new int[] { 0, 1, 2, 3 }, 
+		new int[] { 1, 5, 6, 2 }, 
+		new int[] { 4, 0, 3, 7 }, 
+		new int[] { 3, 2, 6, 7 }, 
+		new int[] { 1, 0, 4, 5 }  
+	};
+
+	public class MeshData
+	{
+		public List<Vector3> OpaqueVertices = new List<Vector3>();
+		public List<Vector2> OpaqueUVs = new List<Vector2>();
+		public List<int> OpaqueIndices = new List<int>();
+
+		public List<Vector3> WaterVertices = new List<Vector3>();
+		public List<Vector2> WaterUVs = new List<Vector2>();
+		public List<int> WaterIndices = new List<int>();
+
+		public List<Vector3> CollisionFaces = new List<Vector3>();
+	}
+
 	public override void _Ready()
 	{
 		_opaqueMeshInstance = new MeshInstance3D();
@@ -38,6 +62,13 @@ public partial class Chunk : StaticBody3D
 		AddChild(_opaqueMeshInstance);
 		AddChild(_waterMeshInstance);
 		AddChild(_collisionShape);
+
+		InitializeGlobalMaterials();
+	}
+
+	public static bool IsWater(byte blockType)
+	{
+		return blockType == 8 || (blockType >= 11 && blockType <= 17);
 	}
 
 	private static void InitializeGlobalMaterials()
@@ -46,17 +77,18 @@ public partial class Chunk : StaticBody3D
 
 		string[] paths = new string[]
 		{
-			"res://textures/bedrock.png",         
-			"res://textures/stone.png",           
-			"res://textures/dirt.png",            
-			"res://textures/grassblock_top.png",  
-			"res://textures/grassblock_side.png", 
-			"res://textures/oaklog_side.png",     
-			"res://textures/oaklog_top.png",      
-			"res://textures/leaves.png",          
-			"res://textures/oakplanks.png",       
-			"res://textures/obsidian.png",        
-			"res://textures/water.png"            
+			"res://textures/bedrock.png",         // 0
+			"res://textures/stone.png",           // 1
+			"res://textures/dirt.png",            // 2
+			"res://textures/grassblock_top.png",  // 3
+			"res://textures/grassblock_side.png", // 4
+			"res://textures/oaklog_side.png",     // 5
+			"res://textures/oaklog_top.png",      // 6
+			"res://textures/leaves.png",          // 7
+			"res://textures/oakplanks.png",       // 8
+			"res://textures/sand.png",            // 9
+			"res://textures/obsidian.png",        // 10
+			"res://textures/water.png"            // 11
 		};
 
 		Image atlasImage = Image.CreateEmpty(paths.Length * 16, 16, false, Image.Format.Rgba8);
@@ -70,32 +102,30 @@ public partial class Chunk : StaticBody3D
 		}
 		ImageTexture texture = ImageTexture.CreateFromImage(atlasImage);
 
-		_opaqueMaterial = new StandardMaterial3D();
-		_opaqueMaterial.AlbedoTexture = texture;
-		_opaqueMaterial.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest;
-		_opaqueMaterial.Roughness = 1.0f;
-		_opaqueMaterial.Transparency = BaseMaterial3D.TransparencyEnum.Disabled;
+		_opaqueMaterial = new StandardMaterial3D
+		{
+			AlbedoTexture = texture,
+			TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
+			Roughness = 1.0f,
+			Transparency = BaseMaterial3D.TransparencyEnum.Disabled
+		};
 
-		_waterMaterial = new StandardMaterial3D();
-		_waterMaterial.AlbedoTexture = texture;
-		_waterMaterial.TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest;
-		_waterMaterial.Roughness = 0.2f; 
-		_waterMaterial.Transparency = BaseMaterial3D.TransparencyEnum.Alpha;
-		_waterMaterial.AlbedoColor = new Color(1f, 1f, 1f, 0.65f); 
+		_waterMaterial = new StandardMaterial3D
+		{
+			AlbedoTexture = texture,
+			TextureFilter = BaseMaterial3D.TextureFilterEnum.Nearest,
+			Roughness = 0.1f,
+			Transparency = BaseMaterial3D.TransparencyEnum.Alpha,
+			AlbedoColor = new Color(1f, 1f, 1f, 0.65f),
+			DepthDrawMode = BaseMaterial3D.DepthDrawModeEnum.OpaqueOnly,
+			RenderPriority = 1,
+			CullMode = BaseMaterial3D.CullModeEnum.Disabled
+		};
 	}
 
-	public void RegenerateMesh(Dictionary<byte, StandardMaterial3D> materials)
+	public MeshData BuildMeshData(Func<int, int, int, byte> getBlockFunc)
 	{
-		InitializeGlobalMaterials();
-
-		var stOpaque = new SurfaceTool();
-		stOpaque.Begin(Mesh.PrimitiveType.Triangles);
-
-		var stWater = new SurfaceTool();
-		stWater.Begin(Mesh.PrimitiveType.Triangles);
-
-		bool hasOpaqueGeometry = false;
-		bool hasWaterGeometry = false;
+		MeshData data = new MeshData();
 
 		for (int x = 0; x < Width; x++)
 		{
@@ -108,30 +138,45 @@ public partial class Chunk : StaticBody3D
 
 					for (int i = 0; i < 6; i++)
 					{
-						if (ShouldRenderFace(x, y, z, blockType, i))
+						if (ShouldRenderFace(x, y, z, blockType, i, getBlockFunc))
 						{
-							if (blockType == 8) 
-							{
-								AddFace(stWater, x, y, z, i, blockType);
-								hasWaterGeometry = true;
-							}
-							else 
-							{
-								AddFace(stOpaque, x, y, z, i, blockType);
-								hasOpaqueGeometry = true;
-							}
+							AddFaceToData(data, x, y, z, i, blockType, getBlockFunc);
 						}
 					}
 				}
 			}
 		}
 
-		if (hasOpaqueGeometry)
+		return data;
+	}
+
+	public void ApplyMeshData(MeshData data)
+	{
+		InitializeGlobalMaterials();
+
+		if (data.OpaqueVertices.Count > 0)
 		{
-			ArrayMesh opaqueMesh = stOpaque.Commit();
-			_opaqueMeshInstance.Mesh = opaqueMesh;
+			var arrays = new Godot.Collections.Array();
+			arrays.Resize((int)Mesh.ArrayType.Max);
+			arrays[(int)Mesh.ArrayType.Vertex] = data.OpaqueVertices.ToArray();
+			arrays[(int)Mesh.ArrayType.TexUV] = data.OpaqueUVs.ToArray();
+			arrays[(int)Mesh.ArrayType.Index] = data.OpaqueIndices.ToArray();
+
+			var mesh = new ArrayMesh();
+			mesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+
+			_opaqueMeshInstance.Mesh = mesh;
 			_opaqueMeshInstance.MaterialOverride = _opaqueMaterial;
-			_collisionShape.Shape = opaqueMesh.CreateTrimeshShape();
+
+			var faces = data.CollisionFaces.ToArray();
+			if (_collisionShape.Shape is ConcavePolygonShape3D concaveShape)
+			{
+				concaveShape.Data = faces;
+			}
+			else
+			{
+				_collisionShape.Shape = new ConcavePolygonShape3D { Data = faces };
+			}
 		}
 		else
 		{
@@ -139,9 +184,18 @@ public partial class Chunk : StaticBody3D
 			_collisionShape.Shape = null;
 		}
 
-		if (hasWaterGeometry)
+		if (data.WaterVertices.Count > 0)
 		{
-			_waterMeshInstance.Mesh = stWater.Commit();
+			var arrays = new Godot.Collections.Array();
+			arrays.Resize((int)Mesh.ArrayType.Max);
+			arrays[(int)Mesh.ArrayType.Vertex] = data.WaterVertices.ToArray();
+			arrays[(int)Mesh.ArrayType.TexUV] = data.WaterUVs.ToArray();
+			arrays[(int)Mesh.ArrayType.Index] = data.WaterIndices.ToArray();
+
+			var waterMesh = new ArrayMesh();
+			waterMesh.AddSurfaceFromArrays(Mesh.PrimitiveType.Triangles, arrays);
+
+			_waterMeshInstance.Mesh = waterMesh;
 			_waterMeshInstance.MaterialOverride = _waterMaterial;
 		}
 		else
@@ -150,7 +204,53 @@ public partial class Chunk : StaticBody3D
 		}
 	}
 
-	private bool ShouldRenderFace(int x, int y, int z, byte currentBlock, int direction)
+	public void RegenerateMesh(Dictionary<byte, StandardMaterial3D> materials = null)
+	{
+		_worldGenerator ??= GetParent<WorldGenerator>();
+		Func<int, int, int, byte> getBlockFunc = (gx, gy, gz) =>
+		{
+			int bx = gx - ChunkX * Width;
+			int by = gy;
+			int bz = gz - ChunkZ * Width;
+			if (bx >= 0 && bx < Width && by >= 0 && by < Height && bz >= 0 && bz < Width)
+				return Blocks[bx, by, bz];
+			return _worldGenerator != null ? _worldGenerator.GetBlockAt(gx, gy, gz) : (byte)0;
+		};
+
+		MeshData data = BuildMeshData(getBlockFunc);
+		ApplyMeshData(data);
+	}
+
+	private byte GetNeighborBlock(int nx, int ny, int nz, Func<int, int, int, byte> getBlockFunc)
+	{
+		if (ny < 0 || ny >= Height) return 0;
+		if (nx >= 0 && nx < Width && nz >= 0 && nz < Width)
+			return Blocks[nx, ny, nz];
+
+		int globalX = ChunkX * Width + nx;
+		int globalY = ny;
+		int globalZ = ChunkZ * Width + nz;
+
+		return getBlockFunc(globalX, globalY, globalZ);
+	}
+
+	private float GetWaterHeight(int x, int y, int z, byte blockType, Func<int, int, int, byte> getBlockFunc)
+	{
+		if (IsWater(GetNeighborBlock(x, y + 1, z, getBlockFunc)))
+		{
+			return 1.0f;
+		}
+
+		if (blockType == 8) return 0.9f;
+		if (blockType >= 11 && blockType <= 17)
+		{
+			int level = 18 - blockType;
+			return (level / 8.0f) * 0.9f;
+		}
+		return 1.0f;
+	}
+
+	private bool ShouldRenderFace(int x, int y, int z, byte currentBlock, int direction, Func<int, int, int, byte> getBlockFunc)
 	{
 		int nx = x + Directions[direction].X;
 		int ny = y + Directions[direction].Y;
@@ -158,67 +258,68 @@ public partial class Chunk : StaticBody3D
 
 		if (ny < 0 || ny >= Height) return true;
 
-		byte neighborBlock = 0;
+		byte neighborBlock = GetNeighborBlock(nx, ny, nz, getBlockFunc);
+		bool isCurrentWater = IsWater(currentBlock);
+		bool isNeighborWater = IsWater(neighborBlock);
 
-		// Фикс барьера: Если выходим за рамки чанка, честно спрашиваем блок у WorldGenerator
-		if (nx < 0 || nx >= Width || nz < 0 || nz >= Width)
+		if (isCurrentWater)
 		{
-			int globalX = ChunkX * Width + nx;
-			int globalY = ny;
-			int globalZ = ChunkZ * Width + nz;
+			if (direction == 4) return !isNeighborWater;
+			if (direction == 5) return neighborBlock == 0;
 
-			var generator = GetParent<WorldGenerator>();
-			if (generator != null)
+			if (isNeighborWater)
 			{
-				neighborBlock = generator.GetBlockAt(globalX, globalY, globalZ);
+				float currentH = GetWaterHeight(x, y, z, currentBlock, getBlockFunc);
+				float neighborH = GetWaterHeight(nx, ny, nz, neighborBlock, getBlockFunc);
+				return currentH > neighborH;
 			}
-			else
-			{
-				return true;
-			}
-		}
-		else
-		{
-			neighborBlock = Blocks[nx, ny, nz];
-		}
 
-		if (neighborBlock == 0) return true; 
-
-		if (currentBlock == 8)
-		{
-			// Вода скрывает грань, если рядом тоже вода (включая воду в соседнем чанке!)
 			return neighborBlock == 0;
 		}
 
-		if (neighborBlock == 8) return true;
-
-		return false; 
+		return neighborBlock == 0 || isNeighborWater;
 	}
 
-	private void AddFace(SurfaceTool st, int x, int y, int z, int direction, byte blockType)
+	private void AddFaceToData(MeshData data, int x, int y, int z, int direction, byte blockType, Func<int, int, int, byte> getBlockFunc)
 	{
 		int textureSlot = 0;
+		bool rotateUv = false;
 
-		switch (blockType)
+		if (IsWater(blockType))
 		{
-			case 1: textureSlot = 0; break; 
-			case 2: textureSlot = 1; break; 
-			case 3: 
-				if (direction == 4)      textureSlot = 3; 
-				else if (direction == 5) textureSlot = 2; 
-				else                     textureSlot = 4; 
-				break;
-			case 4: 
-				if (direction == 4 || direction == 5) textureSlot = 6;
-				else                                  textureSlot = 5;
-				break;
-			case 5: textureSlot = 7; break;  
-			case 6: textureSlot = 8; break;  
-			case 7: textureSlot = 9; break;  
-			case 8: textureSlot = 10; break; 
+			textureSlot = 11;
+		}
+		else
+		{
+			switch (blockType)
+			{
+				case 1: textureSlot = 0; break;
+				case 2: textureSlot = 1; break;
+				case 3:
+					textureSlot = (direction == 4) ? 3 : ((direction == 5) ? 2 : 4);
+					break;
+				case 4: // Вертикальное бревно (Y)
+					textureSlot = (direction == 4 || direction == 5) ? 6 : 5;
+					break;
+				case 18: // Горизонтальное бревно (X)
+					textureSlot = (direction == 2 || direction == 3) ? 6 : 5;
+					if (direction == 0 || direction == 1 || direction == 4 || direction == 5)
+						rotateUv = true; // Поворачиваем текстуру коры на 90 градусов вдоль оси X
+					break;
+				case 19: // Горизонтальное бревно (Z)
+					textureSlot = (direction == 0 || direction == 1) ? 6 : 5;
+					if (direction == 2 || direction == 3)
+						rotateUv = true; // Поворачиваем текстуру коры на 90 градусов вдоль оси Z
+					break;
+				case 5: textureSlot = 7; break;
+				case 6: textureSlot = 8; break;
+				case 7: textureSlot = 9; break;
+				case 9: textureSlot = 2; break;
+				case 10: textureSlot = 10; break;
+			}
 		}
 
-		float step = 1f / 11f; 
+		float step = 1f / 12f;
 		float uStart = textureSlot * step;
 		float uEnd = uStart + step;
 
@@ -227,30 +328,73 @@ public partial class Chunk : StaticBody3D
 		Vector2 uv11 = new Vector2(uEnd, 0f);
 		Vector2 uv01 = new Vector2(uStart, 0f);
 
-		Vector3[] v = {
-			new Vector3(x, y, z),          new Vector3(x + 1, y, z),
-			new Vector3(x + 1, y + 1, z),  new Vector3(x, y + 1, z),
-			new Vector3(x, y, z + 1),      new Vector3(x + 1, y, z + 1),
-			new Vector3(x + 1, y + 1, z + 1), new Vector3(x, y + 1, z + 1)
-		};
+		Vector2 p0 = uv10;
+		Vector2 p1 = uv00;
+		Vector2 p2 = uv01;
+		Vector2 p3 = uv11;
 
-		int[][] faces = {
-			new int[] { 5, 4, 7, 6 }, 
-			new int[] { 0, 1, 2, 3 }, 
-			new int[] { 1, 5, 6, 2 }, 
-			new int[] { 4, 0, 3, 7 }, 
-			new int[] { 3, 2, 6, 7 }, 
-			new int[] { 1, 0, 4, 5 }  
-		};
+		if (rotateUv)
+		{
+			p0 = uv11;
+			p1 = uv10;
+			p2 = uv00;
+			p3 = uv01;
+		}
 
-		int[] f = faces[direction];
+		float waterH = IsWater(blockType) ? GetWaterHeight(x, y, z, blockType, getBlockFunc) : 1.0f;
+		float minWaterH = 0.0f;
 
-		st.SetUV(uv10); st.AddVertex(v[f[0]]);
-		st.SetUV(uv00); st.AddVertex(v[f[1]]);
-		st.SetUV(uv01); st.AddVertex(v[f[2]]);
+		if (IsWater(blockType) && direction >= 0 && direction <= 3)
+		{
+			int nx = x + Directions[direction].X;
+			int ny = y + Directions[direction].Y;
+			int nz = z + Directions[direction].Z;
+			byte neighborBlock = GetNeighborBlock(nx, ny, nz, getBlockFunc);
+			if (IsWater(neighborBlock))
+			{
+				minWaterH = GetWaterHeight(nx, ny, nz, neighborBlock, getBlockFunc);
+			}
+		}
 
-		st.SetUV(uv10); st.AddVertex(v[f[0]]);
-		st.SetUV(uv01); st.AddVertex(v[f[2]]);
-		st.SetUV(uv11); st.AddVertex(v[f[3]]);
+		Span<Vector3> v = stackalloc Vector3[8];
+		v[0] = new Vector3(x, y + minWaterH, z);
+		v[1] = new Vector3(x + 1, y + minWaterH, z);
+		v[2] = new Vector3(x + 1, y + waterH, z);
+		v[3] = new Vector3(x, y + waterH, z);
+		v[4] = new Vector3(x, y + minWaterH, z + 1);
+		v[5] = new Vector3(x + 1, y + minWaterH, z + 1);
+		v[6] = new Vector3(x + 1, y + waterH, z + 1);
+		v[7] = new Vector3(x, y + waterH, z + 1);
+
+		int[] f = FaceIndices[direction];
+
+		bool water = IsWater(blockType);
+		List<Vector3> verts = water ? data.WaterVertices : data.OpaqueVertices;
+		List<Vector2> uvs = water ? data.WaterUVs : data.OpaqueUVs;
+		List<int> indices = water ? data.WaterIndices : data.OpaqueIndices;
+
+		int baseIndex = verts.Count;
+
+		verts.Add(v[f[0]]); uvs.Add(p0);
+		verts.Add(v[f[1]]); uvs.Add(p1);
+		verts.Add(v[f[2]]); uvs.Add(p2);
+		verts.Add(v[f[3]]); uvs.Add(p3);
+
+		indices.Add(baseIndex + 0);
+		indices.Add(baseIndex + 1);
+		indices.Add(baseIndex + 2);
+		indices.Add(baseIndex + 0);
+		indices.Add(baseIndex + 2);
+		indices.Add(baseIndex + 3);
+
+		if (!water)
+		{
+			data.CollisionFaces.Add(v[f[0]]);
+			data.CollisionFaces.Add(v[f[1]]);
+			data.CollisionFaces.Add(v[f[2]]);
+			data.CollisionFaces.Add(v[f[0]]);
+			data.CollisionFaces.Add(v[f[2]]);
+			data.CollisionFaces.Add(v[f[3]]);
+		}
 	}
 }

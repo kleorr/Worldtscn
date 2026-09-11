@@ -32,10 +32,38 @@ public partial class NetworkManager : Node
 		}
 	}
 
+	public override void _ExitTree()
+	{
+		if (Multiplayer != null)
+		{
+			Multiplayer.PeerConnected -= OnPeerConnected;
+			Multiplayer.PeerDisconnected -= OnPeerDisconnected;
+			Multiplayer.ConnectedToServer -= OnConnectedToServer;
+			Multiplayer.ConnectionFailed -= OnConnectionFailed;
+			Multiplayer.ServerDisconnected -= OnServerDisconnected;
+		}
+
+		DisconnectNetwork();
+	}
+
+	public void DisconnectNetwork()
+	{
+		if (Multiplayer != null && Multiplayer.MultiplayerPeer != null)
+		{
+			Multiplayer.MultiplayerPeer.Close();
+			Multiplayer.MultiplayerPeer = null;
+			GD.Print("[СЕТЬ] Соединение явно закрыто.");
+		}
+	}
+
 	private async void StartLocalWorld()
 	{
 		ShowLoadingScreen("Generating world. Please wait...");
 		
+		// Закрываем прошлые сетевые соединения и создаем локальный OfflinePeer для одиночной игры
+		DisconnectNetwork();
+		Multiplayer.MultiplayerPeer = new OfflineMultiplayerPeer();
+
 		var worldGenerator = GetTree().CurrentScene as WorldGenerator;
 		if (worldGenerator != null)
 		{
@@ -49,11 +77,7 @@ public partial class NetworkManager : Node
 
 	public void HostGame()
 	{
-		if (Multiplayer.MultiplayerPeer is ENetMultiplayerPeer enetPeer && enetPeer.GetConnectionStatus() != MultiplayerPeer.ConnectionStatus.Disconnected)
-		{
-			GD.Print("[СЕТЬ] Сервер уже работает.");
-			return;
-		}
+		DisconnectNetwork();
 
 		var peer = new ENetMultiplayerPeer();
 		var error = peer.CreateServer(DefaultPort, 4);
@@ -70,6 +94,8 @@ public partial class NetworkManager : Node
 
 	private void JoinGame(string ipAddress)
 	{
+		DisconnectNetwork();
+
 		var peer = new ENetMultiplayerPeer();
 		var error = peer.CreateClient(ipAddress, DefaultPort);
 		
@@ -83,8 +109,6 @@ public partial class NetworkManager : Node
 		Multiplayer.MultiplayerPeer = peer;
 		GD.Print($"[СЕТЬ] Подключение к хосту {ipAddress}...");
 	}
-
-	// === СИГНАЛЫ КЛИЕНТА ===
 
 	private void OnConnectedToServer()
 	{
@@ -103,8 +127,6 @@ public partial class NetworkManager : Node
 		GD.Print("[СЕТЬ] Соединение потеряно.");
 		ShowLoadingScreen("Connection lost...");
 	}
-
-	// === СЕТЕВАЯ ЛОГИКА ===
 
 	private void OnPeerConnected(long id)
 	{
@@ -129,10 +151,6 @@ public partial class NetworkManager : Node
 		{
 			await worldGenerator.GenerateWorld();
 		}
-		else
-		{
-			GD.PrintErr("[ОШИБКА] Не найден скрипт WorldGenerator на главной сцене клиента!");
-		}
 
 		GD.Print("[СЕТЬ] Карта построена. Запрашиваем спавн у сервера...");
 		RpcId(1, nameof(ClientIsReadyToSpawn));
@@ -146,10 +164,7 @@ public partial class NetworkManager : Node
 		long clientId = Multiplayer.GetRemoteSenderId();
 		GD.Print($"[СЕТЬ] Клиент {clientId} полностью готов. Спавним его персонажа.");
 		
-		// Сервер создает ноду. MultiplayerSpawner сам передаст её клиенту вместе с координатами!
 		SpawnPlayer(clientId);
-
-		// Просто говорим клиенту, что всё готово, и можно убирать загрузочный экран
 		RpcId(clientId, nameof(OnClientSpawnSuccess));
 	}
 
@@ -196,20 +211,12 @@ public partial class NetworkManager : Node
 
 		player.Name = id.ToString();
 		player.SetMultiplayerAuthority((int)id);
-		
-		// Дублируем добавление в группу здесь, НО обязательно добавь AddToGroup("Players") в скрипт Player.cs!
 		player.AddToGroup("Players"); 
-		
-		// Задаем стартовую позицию в центре мира
 		player.Position = new Vector3(0f, Chunk.Height + 5f, 0f); 
 		
 		GetTree().CurrentScene.AddChild(player);
 		GD.Print($"[СЕТЬ] Игрок {id} успешно заспавнен в координатах {player.Position}");
 	}
-
-	// ========================================================
-	// СИНХРОНИЗАЦИЯ БЛОКОВ (ИСПРАВЛЕНО ДЛЯ ХОСТА И КЛИЕНТОВ)
-	// ========================================================
 
 	public void ChallengeBlockChange(Vector3I blockCoords, int blockType)
 	{
@@ -217,19 +224,15 @@ public partial class NetworkManager : Node
 		{
 			if (Multiplayer.IsServer())
 			{
-				// ЕСЛИ ЭТО ХОСТ: ему не нужно слать RPC самому себе!
-				// Он сразу командует ВСЕМ (включая себя через CallLocal) обновить блок
 				Rpc(nameof(BroadcastBlockChangeRpc), blockCoords, blockType);
 			}
 			else
 			{
-				// ЕСЛИ ЭТО КЛИЕНТ: он отправляет запрос на сервер (ID 1)
 				RpcId(1, nameof(RequestBlockChangeRpc), blockCoords, blockType);
 			}
 		}
 		else
 		{
-			// Одиночная игра
 			ApplyBlockChangeLocally(blockCoords, blockType);
 		}
 	}
@@ -237,14 +240,18 @@ public partial class NetworkManager : Node
 	[Rpc(MultiplayerApi.RpcMode.AnyPeer, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
 	private void RequestBlockChangeRpc(Vector3I blockCoords, int blockType)
 	{
-		// На всякий случай проверяем, что метод выполняет сервер
 		if (!Multiplayer.IsServer()) return;
 
-		// Сервер принял запрос от клиента и пускает волну перерисовки для ВСЕХ участников
+		var worldGenerator = GetTree().CurrentScene as WorldGenerator;
+		if (worldGenerator != null)
+		{
+			byte currentBlock = worldGenerator.GetBlockAt(blockCoords.X, blockCoords.Y, blockCoords.Z);
+			if (currentBlock == 1) return;
+		}
+
 		Rpc(nameof(BroadcastBlockChangeRpc), blockCoords, blockType);
 	}
 
-	// CallLocal = true гарантирует, что метод выполнится и на сервере, и на всех клиентах
 	[Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true, TransferMode = MultiplayerPeer.TransferModeEnum.Reliable)]
 	private void BroadcastBlockChangeRpc(Vector3I blockCoords, int blockType)
 	{
@@ -260,8 +267,6 @@ public partial class NetworkManager : Node
 			GD.Print($"[БЛОКИ] Изменен блок в точке {blockCoords} на тип {blockType}");
 		}
 	}
-
-	// === ИНТЕРФЕЙС ЗАГРУЗКИ ===
 
 	private void ShowLoadingScreen(string message)
 	{
