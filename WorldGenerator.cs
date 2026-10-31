@@ -20,6 +20,7 @@ public partial class WorldGenerator : Node3D
 		public string WorldName { get; set; }
 		public int Seed { get; set; }
 		public int Mode { get; set; }
+		public int GameMode { get; set; } 
 		public float PlayerX { get; set; }
 		public float PlayerY { get; set; }
 		public float PlayerZ { get; set; }
@@ -103,7 +104,7 @@ public partial class WorldGenerator : Node3D
 			int z = Mathf.FloorToInt(playerPos.Z);
 			int fps = Mathf.RoundToInt((float)Engine.GetFramesPerSecond());
 
-			_infoLabel.Text = $"FPS: {fps}\nWorld: {WorldSettings.CurrentWorldName} | Seed: {WorldSettings.CurrentSeed} | Mode: {WorldSettings.CurrentMode}\nXYZ: {x} / {y} / {z}";
+			_infoLabel.Text = $"FPS: {fps}\nWorld: {WorldSettings.CurrentWorldName} | Seed: {WorldSettings.CurrentSeed} | Mode: {WorldSettings.CurrentMode} | GameMode: {WorldSettings.CurrentGameMode}\nXYZ: {x} / {y} / {z}";
 		}
 	}
 
@@ -115,6 +116,54 @@ public partial class WorldGenerator : Node3D
 				DisplayServer.WindowSetMode(DisplayServer.WindowMode.Windowed);
 			else
 				DisplayServer.WindowSetMode(DisplayServer.WindowMode.Fullscreen);
+		}
+	}
+
+	// УПАКОВКА В int[] И byte[] ДЛЯ БЕЗОШИБОЧНОЙ СЕТЕВОЙ ПЕРЕДАЧИ В VARIANT
+	public (int[] coords, byte[] types) GetModifiedBlocksData()
+	{
+		int count = _modifiedBlocksDict.Count;
+		int[] coords = new int[count * 3];
+		byte[] types = new byte[count];
+		int i = 0;
+
+		foreach (var pair in _modifiedBlocksDict)
+		{
+			coords[i * 3 + 0] = pair.Key.X;
+			coords[i * 3 + 1] = pair.Key.Y;
+			coords[i * 3 + 2] = pair.Key.Z;
+			types[i] = pair.Value;
+			i++;
+		}
+
+		return (coords, types);
+	}
+
+	public void ApplyModifiedBlocksData(int[] coords, byte[] types)
+	{
+		_modifiedBlocksDict.Clear();
+		_modifiedBlocksByChunk.Clear();
+
+		if (coords == null || types == null) return;
+		int count = types.Length;
+		if (coords.Length != count * 3) return;
+
+		for (int i = 0; i < count; i++)
+		{
+			Vector3I pos = new Vector3I(coords[i * 3 + 0], coords[i * 3 + 1], coords[i * 3 + 2]);
+			byte type = types[i];
+			_modifiedBlocksDict[pos] = type;
+
+			int bcx = Mathf.FloorToInt((float)pos.X / Chunk.Width);
+			int bcz = Mathf.FloorToInt((float)pos.Z / Chunk.Width);
+			Vector2I chunkKey = new Vector2I(bcx, bcz);
+
+			if (!_modifiedBlocksByChunk.TryGetValue(chunkKey, out var dictInChunk))
+			{
+				dictInChunk = new Dictionary<Vector3I, byte>();
+				_modifiedBlocksByChunk[chunkKey] = dictInChunk;
+			}
+			dictInChunk[pos] = type;
 		}
 	}
 
@@ -837,6 +886,7 @@ public partial class WorldGenerator : Node3D
 				WorldName = WorldSettings.CurrentWorldName,
 				Seed = WorldSettings.CurrentSeed,
 				Mode = (int)WorldSettings.CurrentMode,
+				GameMode = (int)WorldSettings.CurrentGameMode,
 				PlayerX = pX,
 				PlayerY = pY,
 				PlayerZ = pZ,
@@ -881,6 +931,7 @@ public partial class WorldGenerator : Node3D
 			{
 				WorldSettings.CurrentSeed = saveModel.Seed;
 				WorldSettings.CurrentMode = (WorldSettings.GeneratorMode)saveModel.Mode;
+				WorldSettings.CurrentGameMode = (WorldSettings.GameMode)saveModel.GameMode;
 				WorldSettings.SavedPlayerPosition = new Vector3(saveModel.PlayerX, saveModel.PlayerY, saveModel.PlayerZ);
 
 				_modifiedBlocksDict.Clear();

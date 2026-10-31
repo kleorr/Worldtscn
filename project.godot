@@ -10,7 +10,7 @@ config_version=5
 
 [application]
 
-config/name="Worldtscn 1.6"
+config/name="Worldtscn 1.7"
 run/main_scene="uid://7u2n4evcmypg"
 config/features=PackedStringArray("4.7", "C#", "Mobile")
 boot_splash/show_image=false

@@ -27,6 +27,9 @@ offset_top = 164.0
 offset_right = 1152.0
 offset_bottom = 198.0
 
+[node name="GameModeButton" type="Button" parent="VBoxContainer" unique_id=918591708]
+layout_mode = 2
+
 [node name="NormalWorldButton" type="Button" parent="VBoxContainer" unique_id=1841664713]
 layout_mode = 2
 text = "Create Normal World"
@@ -69,6 +72,10 @@ text = "Join to LAN"
 layout_mode = 2
 placeholder_text = "                                                                                                                                IP Address"
 
+[node name="CustomizationButton" type="Button" parent="VBoxContainer5" unique_id=1803840430]
+layout_mode = 2
+text = "Customization"
+
 [node name="Label" type="Label" parent="." unique_id=1818187308]
 layout_mode = 0
 offset_left = 353.0
@@ -80,6 +87,7 @@ text = "Worldtscn"
 horizontal_alignment = 1
 vertical_alignment = 1
 
+[connection signal="pressed" from="VBoxContainer/GameModeButton" to="." method="_on_game_mode_button_pressed"]
 [connection signal="pressed" from="VBoxContainer/NormalWorldButton" to="." method="_on_normal_world_button_pressed"]
 [connection signal="pressed" from="VBoxContainer3/FlatWorldButton" to="." method="_on_flat_world_button_pressed"]
 [connection signal="pressed" from="VBoxContainer4/SavesButton" to="." method="_on_saves_button_pressed"]
